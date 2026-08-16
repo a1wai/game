@@ -1,0 +1,19 @@
+{
+  "name": "Serpent Arena",
+  "short_name": "Serpent",
+  "description": "Competitive snake: you versus five rival snakes in one arena.",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#05080f",
+  "theme_color": "#070c17",
+  "icons": [
+    {
+      "src": "./assets/favicon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

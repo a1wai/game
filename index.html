@@ -1,0 +1,217 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <title>Serpent Arena — competitive snake vs 5 rivals</title>
+    <meta
+      name="description"
+      content="Serpent Arena is a fast, competitive twist on classic snake: outgrow and outmanoeuvre five rival snakes. One wrong turn and it's over."
+    />
+    <meta name="theme-color" content="#070c17" />
+    <meta name="color-scheme" content="dark" />
+
+    <meta property="og:type" content="website" />
+    <meta property="og:title" content="Serpent Arena" />
+    <meta
+      property="og:description"
+      content="Competitive snake: you versus five rival snakes in one arena."
+    />
+    <meta name="twitter:card" content="summary_large_image" />
+
+    <link rel="icon" href="./assets/favicon.svg" type="image/svg+xml" />
+    <link rel="apple-touch-icon" href="./assets/favicon.svg" />
+    <link rel="manifest" href="./manifest.webmanifest" />
+    <link rel="stylesheet" href="./styles/main.css" />
+  </head>
+  <body data-playing="false">
+    <div class="app">
+      <header class="topbar">
+        <div class="brand">
+          <span class="brand-mark" aria-hidden="true"></span>
+          <div class="brand-text">
+            <h1>Serpent Arena</h1>
+            <p>You vs 5 rival snakes</p>
+          </div>
+        </div>
+
+        <div class="stats" role="group" aria-label="Match statistics">
+          <div class="stat">
+            <span class="stat-key">Score</span><span class="stat-val" id="stat-score">0</span>
+          </div>
+          <div class="stat">
+            <span class="stat-key">Best</span><span class="stat-val" id="stat-best">0</span>
+          </div>
+          <div class="stat">
+            <span class="stat-key">Rank</span><span class="stat-val" id="stat-rank">1/6</span>
+          </div>
+          <div class="stat">
+            <span class="stat-key">Alive</span><span class="stat-val" id="stat-alive">6</span>
+          </div>
+          <div class="stat">
+            <span class="stat-key">Time</span><span class="stat-val" id="stat-time">00:00</span>
+          </div>
+        </div>
+
+        <div class="tools">
+          <button class="icon-btn" id="btn-pause" type="button" title="Pause (Space)">
+            <span aria-hidden="true">❚❚</span><span class="sr-only">Pause</span>
+          </button>
+          <button class="icon-btn" id="btn-restart" type="button" title="Restart (R)">
+            <span aria-hidden="true">↻</span><span class="sr-only">Restart</span>
+          </button>
+          <button
+            class="icon-btn"
+            id="btn-sound"
+            type="button"
+            aria-pressed="true"
+            title="Sound (M)"
+          >
+            <svg
+              viewBox="0 0 24 24"
+              width="17"
+              height="17"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="2"
+              stroke-linecap="round"
+              aria-hidden="true"
+            >
+              <path d="M11 5 6.5 9H3v6h3.5L11 19z" fill="currentColor" stroke="none" />
+              <g class="i-wave">
+                <path d="M14.8 9.2a4 4 0 0 1 0 5.6" />
+                <path d="M17.6 6.4a8 8 0 0 1 0 11.2" />
+              </g>
+              <g class="i-mute">
+                <path d="m15.5 9.5 5 5" />
+                <path d="m20.5 9.5-5 5" />
+              </g>
+            </svg>
+            <span class="sr-only">Sound</span>
+          </button>
+        </div>
+      </header>
+
+      <main class="stage">
+        <section class="board-wrap" id="surface">
+          <canvas id="board" width="924" height="616" aria-label="Serpent Arena game board"></canvas>
+
+          <div class="overlay" id="overlay" data-screen="start">
+            <!-- ------------------------------- start ------------------------------- -->
+            <section class="screen" id="screen-start">
+              <p class="eyebrow">Competitive snake</p>
+              <h2>Serpent Arena</h2>
+              <p class="lede">
+                Six snakes, one arena, one rule that matters: <strong>you</strong> are the only one
+                who doesn't come back. Touch a rival, bite yourself, or kiss a wall and the run
+                ends.
+              </p>
+
+              <div class="field">
+                <span class="field-label">Difficulty</span>
+                <div class="segmented" role="radiogroup" aria-label="Difficulty">
+                  <label
+                    ><input type="radio" name="difficulty" value="chill" /><span>Chill</span></label
+                  >
+                  <label
+                    ><input type="radio" name="difficulty" value="normal" checked /><span
+                      >Normal</span
+                    ></label
+                  >
+                  <label
+                    ><input type="radio" name="difficulty" value="brutal" /><span
+                      >Brutal</span
+                    ></label
+                  >
+                </div>
+              </div>
+
+              <label class="switch">
+                <input type="checkbox" id="opt-wrap" />
+                <span class="switch-track" aria-hidden="true"><span class="switch-thumb"></span></span>
+                <span class="switch-text">
+                  <strong>Wrap-around walls</strong>
+                  <small>Off: the edge kills. On: slide through to the other side.</small>
+                </span>
+              </label>
+
+              <button class="btn primary" id="btn-play" type="button" data-autofocus>
+                Enter the arena
+              </button>
+              <p class="hint" id="best-label">Normal best: 0</p>
+              <p class="hint">
+                <kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> or arrows to steer ·
+                <kbd>Space</kbd> pause · <kbd>R</kbd> restart · swipe on mobile
+              </p>
+            </section>
+
+            <!-- ------------------------------- pause ------------------------------- -->
+            <section class="screen" id="screen-pause">
+              <h2>Paused</h2>
+              <p class="lede">The rivals are holding their breath.</p>
+              <button class="btn primary" id="btn-resume" type="button" data-autofocus>
+                Resume
+              </button>
+              <button class="btn ghost" id="btn-menu" type="button">Main menu</button>
+            </section>
+
+            <!-- ------------------------------- game over --------------------------- -->
+            <section class="screen" id="screen-over">
+              <p class="record" id="over-record" hidden>New personal best</p>
+              <h2 id="over-title">Game over</h2>
+              <p class="lede" id="over-cause">You died.</p>
+
+              <dl class="result-grid">
+                <div><dt>Score</dt><dd id="over-score">0</dd></div>
+                <div><dt>Rank</dt><dd id="over-rank">6 / 6</dd></div>
+                <div><dt>Kills</dt><dd id="over-kills">0</dd></div>
+                <div><dt>Length</dt><dd id="over-length">4</dd></div>
+                <div><dt>Survived</dt><dd id="over-time">00:00</dd></div>
+                <div><dt>Best</dt><dd id="over-best">0</dd></div>
+              </dl>
+
+              <button class="btn primary" id="btn-again" type="button" data-autofocus>
+                Play again
+              </button>
+              <button class="btn ghost" id="btn-menu-over" type="button">Main menu</button>
+            </section>
+          </div>
+        </section>
+
+        <aside class="sidebar">
+          <h2 class="side-title">Leaderboard</h2>
+          <ol class="leaderboard" id="leaderboard"></ol>
+
+          <div class="panel">
+            <h3>How it works</h3>
+            <ul class="rules">
+              <li><span class="dot food" aria-hidden="true"></span>Pellets are +10 and one segment.</li>
+              <li>
+                <span class="dot remains" aria-hidden="true"></span>Fallen snakes drop +15 remains —
+                the spoils of a kill.
+              </li>
+              <li>Ram a rival's body and you get +25 and a kill. They respawn. You don't.</li>
+              <li>A dead rival keeps only half its score — kills move the standings.</li>
+              <li>Head-on hits go to the longer snake. Same length? Both die.</li>
+            </ul>
+          </div>
+        </aside>
+      </main>
+
+      <nav class="dpad" id="dpad" aria-label="Touch controls">
+        <button type="button" data-dir="up" aria-label="Up">▲</button>
+        <button type="button" data-dir="left" aria-label="Left">◀</button>
+        <button type="button" data-dir="down" aria-label="Down">▼</button>
+        <button type="button" data-dir="right" aria-label="Right">▶</button>
+      </nav>
+    </div>
+
+    <noscript>
+      <p style="padding: 2rem; text-align: center; color: #e6eeff">
+        Serpent Arena needs JavaScript enabled.
+      </p>
+    </noscript>
+
+    <script type="module" src="./src/main.js"></script>
+  </body>
+</html>
