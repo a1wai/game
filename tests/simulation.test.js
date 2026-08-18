@@ -2,12 +2,12 @@
  * Headless simulation checks — no DOM, no browser.
  * Run with: npm test
  *
- * The game module is deliberately free of DOM access so the rules can be
- * exercised like any other library.
+ * The game module never touches the DOM, so the rules can be exercised like
+ * any other library.
  */
 import assert from 'node:assert/strict';
 import { Game } from '../src/game.js';
-import { decideDirection } from '../src/ai.js';
+import { WORLD, SNAKE, FOOD } from '../src/config.js';
 
 let checks = 0;
 const check = (label, fn) => {
@@ -16,164 +16,113 @@ const check = (label, fn) => {
   console.log(`  ✓ ${label}`);
 };
 
-/** Drive the player with the same brain the rivals use, so rounds last. */
-function autopilot(game) {
-  const player = game.player;
-  if (!player.alive) return;
-  const dir = decideDirection(player, {
-    board: game.board,
-    blocked: game.buildOccupancy(),
-    risky: game.buildRisk(player),
-    food: new Set(game.food.keys()),
-    tuning: game.difficulty.tuning,
-  });
-  game.queueTurn(dir);
+/**
+ * A round with only the player in it, parked in the middle.
+ * Food top-ups are switched off so each test controls exactly what is in the
+ * arena — otherwise a pellet drifting into range quietly changes the length
+ * these tests are measuring.
+ */
+function soloGame() {
+  const game = new Game();
+  game.start({ difficulty: 'normal' });
+  game.countdown = 0;
+  for (const snake of game.snakes) if (!snake.isPlayer) snake.alive = false;
+  game.food.length = 0;
+  game.replenishFood = () => {};
+  game.player.spawn(0, 0, 0);
+  game.rebuildGrids();
+  return game;
 }
 
 function assertInvariants(game) {
   for (const snake of game.snakes) {
     if (!snake.alive) continue;
-    const seen = new Set();
-    for (const cell of snake.body) {
-      assert.ok(
-        game.board.inBounds(cell.x, cell.y),
-        `${snake.name} left the board at ${cell.x},${cell.y}`,
-      );
-      const key = game.board.index(cell.x, cell.y);
-      assert.ok(!seen.has(key), `${snake.name} overlaps itself at ${cell.x},${cell.y}`);
-      seen.add(key);
-    }
-    assert.ok(snake.length >= 1, `${snake.name} has no body`);
+    assert.ok(Number.isFinite(snake.x) && Number.isFinite(snake.y), `${snake.name} has NaN position`);
+    assert.ok(
+      Math.hypot(snake.x, snake.y) <= WORLD.radius + 1,
+      `${snake.name} is outside the arena`,
+    );
+    assert.ok(snake.length > 0, `${snake.name} has no length`);
+    assert.ok(snake.path.length > 0, `${snake.name} has no body`);
   }
 }
 
 console.log('Serpent Arena — simulation');
 
-check('a fresh round spawns six snakes and a full pantry', () => {
+check('a fresh round spawns six snakes inside the arena, plus food', () => {
   const game = new Game();
   game.start({ difficulty: 'normal' });
   assert.equal(game.snakes.length, 6);
-  assert.equal(game.snakes.filter((s) => s.alive).length, 6);
-  assert.equal(game.food.size, 10);
-  assert.equal(game.player.length, 4);
-});
-
-check('3000 ticks stay legal (no overlaps, nothing off-board)', () => {
-  const game = new Game();
-  game.start({ difficulty: 'normal' });
-  game.countdown = 0;
-  for (let i = 0; i < 3000; i++) {
-    autopilot(game);
-    game.tick();
-    assertInvariants(game);
-    if (!game.running) game.start({ difficulty: 'normal' }); // player died, run another round
+  assert.equal(game.aliveCount, 6);
+  assert.equal(game.food.length, FOOD.count);
+  assert.equal(game.player.length, SNAKE.startLength);
+  for (const snake of game.snakes) {
+    assert.ok(Math.hypot(snake.x, snake.y) < WORLD.radius, `${snake.name} spawned outside`);
   }
 });
 
-check('snakes actually compete: food is eaten and rivals die', () => {
-  const game = new Game();
-  game.start({ difficulty: 'brutal' });
-  game.countdown = 0;
-  let deaths = 0;
-  game.on('death', () => deaths++);
-  for (let i = 0; i < 1500 && game.running; i++) {
-    autopilot(game);
-    game.tick();
-  }
-  const totalScore = game.snakes.reduce((sum, s) => sum + s.score, 0);
-  assert.ok(totalScore > 0, 'nobody scored in 1500 ticks');
-  assert.ok(deaths > 0, 'no snake ever died in 1500 ticks');
-});
-
-check('dead rivals respawn, the player does not', () => {
+check('sixty seconds of rivals-only play stays legal', () => {
   const game = new Game();
   game.start({ difficulty: 'normal' });
   game.countdown = 0;
-  const rival = game.snakes[1];
-  rival.score = 90;
-  game.kill(rival, { cause: 'wall', killer: null });
-  assert.equal(rival.alive, false);
-  assert.equal(rival.score, 45, 'a dead rival should forfeit half its score');
-  assert.ok(rival.respawnIn > 0);
-  game.update(3000);
-  assert.equal(rival.alive, true, 'rival should be back in the arena');
+  for (let i = 0; i < 3600; i++) {
+    game.update(16.67);
+    if (i % 60 === 0) assertInvariants(game);
+    if (!game.running) {
+      game.start({ difficulty: 'normal' });
+      game.countdown = 0;
+    }
+  }
+});
 
-  game.kill(game.player, { cause: 'wall', killer: null });
+check('a snake can cross its own body without dying', () => {
+  const game = soloGame();
+  game.player.grow(1200); // long enough to lap its own turning circle
+  let laps = 0;
+  for (let i = 0; i < 600; i++) {
+    // Hold a hard turn: the head sweeps back through its own trail.
+    game.setIntent(game.player.angle + 1, false);
+    game.step(1 / 60);
+    laps++;
+    if (!game.player.alive) break;
+  }
+  assert.equal(game.player.alive, true, `died on its own body after ${laps} steps`);
+  assert.ok(game.player.length > 1400, 'should still be long');
+});
+
+check('the arena rim is fatal', () => {
+  const game = soloGame();
+  let result = null;
+  game.on('gameover', (r) => (result = r));
+  game.player.spawn(WORLD.radius - 40, 0, 0); // pointed straight out
+  for (let i = 0; i < 60 && game.player.alive; i++) {
+    game.setIntent(0, false);
+    game.step(1 / 60);
+  }
+  assert.equal(result?.cause, 'edge');
   assert.equal(game.running, false);
-  assert.equal(game.over, true);
-  game.update(5000);
-  assert.equal(game.player.alive, false, 'the player never respawns');
 });
 
-check('walls kill the player', () => {
-  const game = new Game();
-  game.start({ difficulty: 'normal', wrap: false });
-  game.countdown = 0;
-  let result = null;
-  game.on('gameover', (r) => (result = r));
-  game.player.body = [{ x: 1, y: 5 }, { x: 2, y: 5 }, { x: 3, y: 5 }];
-  game.player.dir = 'left';
-  game.tick(); // -> x = 0
-  game.tick(); // -> off the board
-  assert.ok(result, 'no gameover event');
-  assert.equal(result.cause, 'wall');
-});
-
-check('wrap mode carries the player through the edge instead', () => {
-  const game = new Game();
-  game.start({ difficulty: 'normal', wrap: true });
-  game.countdown = 0;
-  game.player.body = [{ x: 0, y: 5 }, { x: 1, y: 5 }, { x: 2, y: 5 }];
-  game.player.dir = 'left';
-  game.tick();
-  assert.equal(game.player.alive, true);
-  assert.equal(game.player.head.x, game.board.cols - 1);
-});
-
-check('biting your own body ends the run', () => {
-  const game = new Game();
-  game.start({ difficulty: 'normal' });
-  game.countdown = 0;
-  let result = null;
-  game.on('gameover', (r) => (result = r));
-  game.player.body = [
-    { x: 10, y: 10 },
-    { x: 11, y: 10 },
-    { x: 11, y: 11 },
-    { x: 10, y: 11 },
-    { x: 9, y: 11 },
-  ];
-  game.player.dir = 'down'; // straight into body[3]
-  game.tick();
-  assert.equal(result?.cause, 'self');
-});
-
-check('crashing into a rival ends the run and pays the rival', () => {
-  const game = new Game();
-  game.start({ difficulty: 'normal' });
-  game.countdown = 0;
+check('running into a rival ends the run and pays the rival', () => {
+  const game = soloGame();
   let result = null;
   game.on('gameover', (r) => (result = r));
 
   const rival = game.snakes[1];
   rival.autopilot = false; // steer it by hand instead of letting the brain dodge
-  game.snakes.slice(2).forEach((s) => (s.alive = false));
-  rival.body = [
-    { x: 20, y: 10 },
-    { x: 20, y: 11 },
-    { x: 20, y: 12 },
-    { x: 20, y: 13 },
-  ];
-  rival.dir = 'up';
-  rival.score = 0;
-  game.player.body = [
-    { x: 19, y: 12 },
-    { x: 18, y: 12 },
-    { x: 17, y: 12 },
-  ];
-  game.player.dir = 'right';
-  // 20,12 is mid-body for the rival — its tail is at 20,13 and won't free the cell.
-  game.tick();
+  rival.alive = true;
+  rival.spawn(0, 0, 0);
+  rival.grow(1200);
+  for (let i = 0; i < 240; i++) rival.advance(1 / 60); // lay down a long wall
+
+  const wall = rival.path[Math.floor(rival.path.length / 2)];
+  game.player.spawn(wall.x, wall.y - 70, Math.PI / 2); // approach it side-on
+  game.rebuildGrids();
+
+  for (let i = 0; i < 60 && game.player.alive; i++) {
+    game.setIntent(Math.PI / 2, false);
+    game.step(1 / 60);
+  }
   assert.equal(result?.cause, 'body');
   assert.equal(result.killer, rival.name);
   assert.equal(rival.kills, 1);
@@ -181,45 +130,102 @@ check('crashing into a rival ends the run and pays the rival', () => {
 });
 
 check('head-on collisions go to the longer snake', () => {
-  const game = new Game();
-  game.start({ difficulty: 'normal' });
-  game.countdown = 0;
-  game.snakes.slice(2).forEach((s) => (s.alive = false));
-
+  const game = soloGame();
   const rival = game.snakes[1];
   rival.autopilot = false;
-  // Player is longer by one segment, so it should survive the trade.
-  game.player.body = [
-    { x: 10, y: 5 },
-    { x: 9, y: 5 },
-    { x: 8, y: 5 },
-    { x: 7, y: 5 },
-  ];
-  game.player.dir = 'right';
-  rival.body = [
-    { x: 12, y: 5 },
-    { x: 13, y: 5 },
-    { x: 14, y: 5 },
-  ];
-  rival.dir = 'left';
-  game.tick(); // both aim at 11,5
-  assert.equal(game.player.alive, true, 'longer snake should win the head-on');
+  rival.alive = true;
+
+  game.player.spawn(-60, 0, 0);
+  game.player.grow(400); // clearly the longer of the two
+  rival.spawn(60, 0, Math.PI);
+  game.rebuildGrids();
+
+  for (let i = 0; i < 60 && game.player.alive && rival.alive; i++) {
+    game.setIntent(0, false);
+    rival.targetAngle = Math.PI;
+    game.step(1 / 60);
+  }
+  assert.equal(game.player.alive, true, 'the longer snake should win the trade');
   assert.equal(rival.alive, false);
   assert.equal(game.player.kills, 1);
 });
 
-check('turn buffer refuses reversals and holds at most two turns', () => {
+check('eating grows the snake and scores', () => {
+  const game = soloGame();
+  const before = { length: game.player.length, score: game.player.score };
+  game.addFood(game.player.x + 30, game.player.y, 'pellet');
+  game.rebuildGrids();
+  for (let i = 0; i < 30 && game.player.score === before.score; i++) {
+    game.setIntent(0, false);
+    game.step(1 / 60);
+  }
+  assert.equal(game.player.score, before.score + FOOD.pellet.value);
+  assert.ok(game.player.length > before.length, 'eating should lengthen the snake');
+});
+
+check('boost burns length and sheds crumbs, and refuses when too short', () => {
+  const game = soloGame();
+  game.player.grow(600);
+  const startLength = game.player.length;
+
+  for (let i = 0; i < 60; i++) {
+    game.setIntent(0, true);
+    game.step(1 / 60);
+  }
+  const burned = startLength - game.player.length;
+  assert.ok(burned > SNAKE.boostDrain * 0.8, `expected to burn length, burned ${burned.toFixed(1)}`);
+  assert.ok(
+    game.food.some((f) => f.kind === 'crumb'),
+    'boosting should drop crumbs',
+  );
+
+  assert.ok(Number.isInteger(game.player.score), `score went fractional: ${game.player.score}`);
+
+  // Too short to boost: the request is simply ignored.
+  game.player.length = SNAKE.minBoostLength - 10;
+  game.setIntent(0, true);
+  game.step(1 / 60);
+  assert.equal(game.player.boosting, false);
+});
+
+check('steering is free-angle and rate limited', () => {
+  const game = soloGame();
+  const target = 0.37; // not a multiple of 90 degrees
+  let maxStep = 0;
+  let previous = game.player.angle;
+
+  for (let i = 0; i < 120; i++) {
+    game.setIntent(target, false);
+    game.step(1 / 60);
+    maxStep = Math.max(maxStep, Math.abs(game.player.angle - previous));
+    previous = game.player.angle;
+  }
+  assert.ok(Math.abs(game.player.angle - target) < 0.001, 'should settle on the exact angle asked for');
+  assert.ok(
+    maxStep <= SNAKE.turnRate / 60 + 1e-9,
+    `turned ${maxStep.toFixed(4)} rad in one step, limit is ${(SNAKE.turnRate / 60).toFixed(4)}`,
+  );
+});
+
+check('dead rivals respawn at half score, the player never does', () => {
   const game = new Game();
   game.start({ difficulty: 'normal' });
   game.countdown = 0;
-  game.player.dir = 'right';
-  game.queueTurn('left'); // reversal, ignored
-  assert.equal(game.turnQueue.length, 0);
-  game.queueTurn('up');
-  game.queueTurn('left');
-  game.queueTurn('down'); // reversal of the queued 'left', ignored
-  game.queueTurn('up');
-  assert.deepEqual(game.turnQueue, ['up', 'left']);
+
+  const rival = game.snakes[1];
+  rival.score = 90;
+  game.kill(rival, { cause: 'edge', killer: null });
+  assert.equal(rival.alive, false);
+  assert.equal(rival.score, 45, 'a dead rival should forfeit half its score');
+  assert.ok(rival.respawnIn > 0);
+  game.update(3200);
+  assert.equal(rival.alive, true, 'rival should be back in the arena');
+
+  game.kill(game.player, { cause: 'edge', killer: null });
+  assert.equal(game.running, false);
+  assert.equal(game.over, true);
+  game.update(6000);
+  assert.equal(game.player.alive, false, 'the player never respawns');
 });
 
 console.log(`\n${checks} checks passed\n`);

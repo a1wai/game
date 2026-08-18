@@ -1,28 +1,47 @@
 import { Game } from './game.js';
 import { Renderer } from './renderer.js';
+import { Camera } from './camera.js';
 import { Hud } from './hud.js';
 import { Sound } from './audio.js';
-import { bindInput } from './input.js';
+import { Controls } from './input.js';
 import { STORAGE_KEY, DIFFICULTY } from './config.js';
 import { readStore, writeStore, formatTime } from './utils.js';
 
 const $ = (id) => document.getElementById(id);
 
+const canvas = $('stage');
 const overlay = $('overlay');
-const canvas = $('board');
-const surface = $('surface');
 
 const settings = readStore(STORAGE_KEY, {
   difficulty: 'normal',
-  wrap: false,
   sound: true,
   best: { chill: 0, normal: 0, brutal: 0 },
 });
 
 const game = new Game();
+const camera = new Camera();
 const renderer = new Renderer(canvas);
 const hud = new Hud(document);
 const sound = new Sound(settings.sound);
+
+/* ------------------------------------------------------------------ *
+ * layout
+ * ------------------------------------------------------------------ */
+
+function resize() {
+  const width = window.innerWidth;
+  const height = window.innerHeight;
+  renderer.resize(width, height);
+  camera.resize(width, height);
+}
+
+window.addEventListener('resize', resize);
+window.addEventListener('orientationchange', () => setTimeout(resize, 120));
+document.addEventListener('fullscreenchange', () => {
+  setTimeout(resize, 60);
+  $('btn-full').setAttribute('aria-pressed', String(Boolean(document.fullscreenElement)));
+});
+resize();
 
 /* ------------------------------------------------------------------ *
  * screens
@@ -33,24 +52,25 @@ function setScreen(name) {
   overlay.dataset.screen = name;
   document.body.dataset.playing = String(name === 'none');
   if (name === 'none') {
-    // Hand the keyboard back to the game, otherwise the button that started the
-    // round keeps focus and eats Space.
+    // Hand the keyboard back to the game.
     if (overlay.contains(document.activeElement)) document.activeElement.blur();
     return;
   }
-  const focus = overlay.querySelector(`#screen-${name} [data-autofocus]`);
-  focus?.focus({ preventScroll: true });
+  overlay.querySelector(`#screen-${name} [data-autofocus]`)?.focus({ preventScroll: true });
 }
 
 function startGame() {
   sound.unlock();
-  game.start({ difficulty: settings.difficulty, wrap: settings.wrap });
+  controls.release();
+  game.start({ difficulty: settings.difficulty });
+  camera.snapTo(game.player);
   hud.mount(game);
   setScreen('none');
 }
 
 function pauseGame() {
   if (!game.running || game.paused) return;
+  controls.release();
   game.togglePause(true);
   setScreen('pause');
 }
@@ -65,23 +85,30 @@ function resumeGame() {
 function openMenu() {
   game.running = false;
   game.paused = false;
+  controls.release();
   setScreen('start');
+}
+
+async function toggleFullscreen() {
+  try {
+    if (document.fullscreenElement) await document.exitFullscreen();
+    else await document.documentElement.requestFullscreen();
+  } catch {
+    /* denied or unsupported — the canvas already fills the viewport */
+  }
 }
 
 /* ------------------------------------------------------------------ *
  * settings
  * ------------------------------------------------------------------ */
 
-function persist() {
-  writeStore(STORAGE_KEY, settings);
-}
+const persist = () => writeStore(STORAGE_KEY, settings);
 
 function syncSettingsUi() {
   const radio = document.querySelector(`input[name="difficulty"][value="${settings.difficulty}"]`);
   if (radio) radio.checked = true;
-  $('opt-wrap').checked = settings.wrap;
   $('btn-sound').setAttribute('aria-pressed', String(settings.sound));
-  $('best-label').textContent = `${DIFFICULTY[settings.difficulty].label} best: ${
+  $('best-label').textContent = `${DIFFICULTY[settings.difficulty].label} best · ${
     settings.best[settings.difficulty] ?? 0
   }`;
 }
@@ -101,39 +128,9 @@ function toggleSound(force) {
  * wiring
  * ------------------------------------------------------------------ */
 
-document.querySelectorAll('input[name="difficulty"]').forEach((input) => {
-  input.addEventListener('change', () => {
-    if (!input.checked) return;
-    settings.difficulty = input.value;
-    persist();
-    syncSettingsUi();
-    sound.play('ui');
-  });
-});
-
-$('opt-wrap').addEventListener('change', (event) => {
-  settings.wrap = event.target.checked;
-  persist();
-});
-
-$('btn-play').addEventListener('click', startGame);
-$('btn-again').addEventListener('click', startGame);
-$('btn-resume').addEventListener('click', resumeGame);
-$('btn-menu').addEventListener('click', openMenu);
-$('btn-menu-over').addEventListener('click', openMenu);
-$('btn-restart').addEventListener('click', () => {
-  if (game.running || game.over) startGame();
-});
-$('btn-pause').addEventListener('click', () => {
-  if (!game.running) return;
-  game.paused ? resumeGame() : pauseGame();
-});
-$('btn-sound').addEventListener('click', () => toggleSound());
-
-bindInput({
-  surface,
-  pad: $('dpad'),
-  onTurn: (dir) => game.queueTurn(dir),
+const controls = new Controls({
+  surface: canvas,
+  joystick: $('joystick'),
   onAction: (action) => {
     const screen = overlay.dataset.screen;
     switch (action) {
@@ -151,43 +148,68 @@ bindInput({
       case 'mute':
         toggleSound();
         break;
+      case 'fullscreen':
+        toggleFullscreen();
+        break;
+      case 'stats':
+        hud.toggle();
+        break;
       default:
         break;
     }
   },
 });
 
-window.addEventListener('resize', () => renderer.resize());
+document.querySelectorAll('input[name="difficulty"]').forEach((input) => {
+  input.addEventListener('change', () => {
+    if (!input.checked) return;
+    settings.difficulty = input.value;
+    persist();
+    syncSettingsUi();
+    sound.play('ui');
+  });
+});
+
+$('btn-play').addEventListener('click', startGame);
+$('btn-again').addEventListener('click', startGame);
+$('btn-resume').addEventListener('click', resumeGame);
+$('btn-menu').addEventListener('click', openMenu);
+$('btn-menu-over').addEventListener('click', openMenu);
+$('btn-sound').addEventListener('click', () => toggleSound());
+$('btn-full').addEventListener('click', toggleFullscreen);
+$('btn-pause').addEventListener('click', () => {
+  if (!game.running) return;
+  game.paused ? resumeGame() : pauseGame();
+});
+
 document.addEventListener('visibilitychange', () => {
   if (document.hidden) pauseGame();
 });
-window.addEventListener('blur', () => pauseGame());
 
 /* ------------------------------------------------------------------ *
- * game events -> sound + end screen
+ * game events
  * ------------------------------------------------------------------ */
 
 game.on('go', () => sound.play('go'));
-game.on('eat', ({ snake, type }) => {
-  if (snake.isPlayer) sound.play(type === 'remains' ? 'bonus' : 'eat');
+game.on('eat', ({ snake, kind }) => {
+  if (snake.isPlayer) sound.play(kind === 'remains' ? 'bonus' : 'eat');
 });
 game.on('kill', ({ killer }) => {
   if (killer.isPlayer) sound.play('bonus');
 });
-game.on('death', ({ snake }) => {
-  sound.play(snake.isPlayer ? 'die' : 'kill');
-});
+game.on('death', ({ snake }) => sound.play(snake.isPlayer ? 'die' : 'kill'));
 game.on('respawn', () => sound.play('respawn'));
 
 const CAUSE_TEXT = {
-  wall: () => 'You slammed into the wall.',
-  self: () => 'You bit your own tail.',
-  body: (killer) => `You crashed into ${killer ?? 'another snake'}.`,
+  edge: () => 'You drifted over the rim of the arena.',
+  body: (killer) => `You ran into ${killer ?? 'another snake'}.`,
   head: (killer) =>
-    killer ? `${killer} out-sized you in a head-on hit.` : 'Head-on collision — nobody walked away.',
+    killer ? `${killer} was longer in a head-on hit.` : 'Head-on collision — nobody walked away.',
 };
 
 game.on('gameover', (result) => {
+  controls.release();
+
   const previousBest = settings.best[result.difficulty] ?? 0;
   const isRecord = result.score > previousBest;
   if (isRecord) {
@@ -217,16 +239,25 @@ game.on('gameover', (result) => {
 let last = performance.now();
 
 function frame(now) {
-  const dt = Math.min(now - last, 100);
+  const ms = Math.min(now - last, 100);
   last = now;
 
-  game.update(dt);
-  renderer.draw(game, now);
+  const direction = controls.direction;
+  game.setIntent(direction ? Math.atan2(direction.y, direction.x) : null, controls.boost);
+  game.update(ms);
+
+  if (!game.paused) camera.follow(game.player, ms);
+  renderer.draw(game, camera, now);
   hud.update(game, settings.best[settings.difficulty] ?? 0);
 
   requestAnimationFrame(frame);
 }
 
+// Show a still of the arena behind the start screen rather than blank paper.
+game.preview();
+game.player.x = 0;
+game.player.y = 0;
+camera.snapTo(game.player);
 hud.mount(game);
 syncSettingsUi();
 setScreen('start');

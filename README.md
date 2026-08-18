@@ -1,100 +1,119 @@
 # 🐍 Serpent Arena
 
-Competitive snake. You against **five rival snakes** in one arena — and only one of
-you stays dead.
+Competitive snake, played the way slither.io plays: an open arena, free-angle
+steering, boost, and **five rival snakes** that hunt the same food you do.
 
-Rivals hunt the same pellets you do, dodge, cut corners and fight over space. Touch
-one of them, bite your own tail, or kiss a wall and the run is over. Kill a rival and
-it drops its body as bonus food, then respawns to come after you again.
+You are the only one who stays dead. Rivals respawn a couple of seconds after
+they die — you get one life. Your own body is harmless; everyone else's is not.
 
-No frameworks, no build step, no dependencies — plain ES modules and one `<canvas>`.
+No frameworks, no build step, no dependencies — plain ES modules and one
+fullscreen `<canvas>`.
 
 ---
 
 ## Play locally
 
-The game uses ES modules, so it needs to be served over HTTP (opening
-`index.html` from the file system won't work). Any static server will do:
+ES modules need to be served over HTTP (opening `index.html` from disk won't
+work). Any static server will do:
 
 ```bash
-# Python — already on most machines
-python3 -m http.server 5173
-
-# or Node
-npx serve . --listen 5173
-# or
-npm run dev
+python3 -m http.server 5173      # already on most machines
+npx serve . --listen 5173        # or: npm run dev
 ```
 
 Then open <http://localhost:5173>.
 
 ## Controls
 
-| Action  | Keyboard                     | Touch              |
-| ------- | ---------------------------- | ------------------ |
-| Steer   | `W` `A` `S` `D` or arrow keys | Swipe or the d-pad |
-| Pause   | `Space` / `Esc` / `P`         | ⏸ button           |
-| Restart | `R`                           | ↻ button           |
-| Mute    | `M`                           | 🔈 button          |
+**Keyboard** — the snake turns toward whatever direction you hold, at a limited
+turn rate, so paths are curves rather than right angles.
 
-Two turns are buffered, so a fast "right then up" both register instead of the
-second one being swallowed.
+| Action     | Key                            |
+| ---------- | ------------------------------ |
+| Steer      | `W` `A` `S` `D` or arrow keys  |
+| Boost      | `Space` or `Shift` (hold)      |
+| Standings  | `Tab`                          |
+| Pause      | `Esc` or `P`                   |
+| Restart    | `R`                            |
+| Fullscreen | `F`                            |
+| Mute       | `M`                            |
+
+**Touch** — a joystick and nothing else. Put a finger down anywhere and the
+stick plants itself there; drag to steer at any angle. While steering, a
+**second finger anywhere on the screen holds boost**. Lift the stick and the
+snake keeps its heading.
 
 ## Rules
 
-- **Pellets** — `+10` and one extra segment.
-- **Remains** — `+15`. Dropped by any snake that dies. Grab them before the rivals do.
-- **Ramming a rival's body** — `+25` and a kill for you. They respawn after a couple of
-  seconds. You don't.
-- **A rival that dies keeps only half its score.** Rivals respawn forever, so without
-  this the leaderboard would be unwinnable for a one-life player — and taking someone
-  down would mean nothing.
-- **Head-on collisions** — the longer snake survives. Equal length, both die.
-- **Walls** — lethal by default. Flip on *wrap-around walls* on the start screen if you
-  prefer the edges to teleport you.
-- **Death** — walls, your own tail, or any part of a rival. One life, no continues.
+- **Pellets** are `+10` and a little length. They're pulled in as you pass, so
+  you don't have to hit them dead on.
+- **Boost** burns length as fuel and sheds it back into the arena as crumbs. It
+  won't engage once you're short.
+- **You never collide with yourself.** Loop through your own body as much as you
+  like — the only lethal things are rival bodies and the rim.
+- **Ramming a rival's body** is `+25` and a kill. They drop their whole body as
+  bonus food.
+- **Head-on hits** go to the longer snake. Near-equal lengths take each other out.
+- **A rival that dies keeps only half its score.** They respawn forever, so
+  without this the standings would be unwinnable for a one-life player — and
+  taking someone down would mean nothing.
 
-Three difficulties change both the tick rate and how sharply the rivals play:
+Difficulty changes rival speed and how sharply they steer:
 
-| Difficulty | Speed  | Rivals                                             |
-| ---------- | ------ | -------------------------------------------------- |
-| Chill      | 132 ms | Careless — they trap themselves fairly often        |
-| Normal     | 104 ms | Play properly, mostly avoid head-on losses          |
-| Brutal     | 82 ms  | Rarely misstep, plan around your head, contest food |
+| Difficulty | Rivals                                                        |
+| ---------- | ------------------------------------------------------------- |
+| Chill      | Slower, careless, rarely come after you                        |
+| Normal     | Steer properly, cut you off now and then                       |
+| Brutal     | Faster, probe much further ahead, hunt shorter snakes on sight |
 
 Best score is stored per difficulty in `localStorage`.
+
+## Interface
+
+The canvas fills the window (`F` for real fullscreen). The only permanent UI is
+a small tab in the corner showing score and rank — **press it** for the full
+standings, length, kills, time and best. A minimap sits bottom-right.
 
 ## How it fits together
 
 ```
-index.html              markup + overlay screens
-styles/main.css         layout, chrome, responsive rules
-src/config.js           all tuning values (grid, speeds, colours, AI weights)
-src/board.js            grid geometry, wrap-aware stepping
-src/snake.js            one competitor
-src/ai.js               rival brain
-src/game.js             the simulation: ticks, collisions, food, scoring
-src/renderer.js         canvas painting
-src/input.js            keyboard, swipe, d-pad
-src/audio.js            WebAudio sound kit (no asset files)
-src/hud.js              live leaderboard + stats
-src/main.js             wiring, screens, main loop
+index.html               markup + overlay screens
+styles/main.css          chrome around the canvas
+src/config.js            every tuning value (world, speeds, colours, AI weights)
+src/snake.js             one competitor: a head plus the trail behind it
+src/grid.js              uniform spatial hash, rebuilt each step
+src/ai.js                rival steering brain
+src/game.js              the simulation: movement, collisions, food, scoring
+src/camera.js            follow camera and zoom
+src/renderer.js          canvas painting
+src/input.js             keyboard, joystick, boost
+src/audio.js             WebAudio sound kit (no asset files)
+src/hud.js               collapsible standings tab
+src/main.js              wiring, screens, main loop
 tests/simulation.test.js headless rule tests
 ```
 
-Two design notes worth knowing if you want to extend it:
+Three things worth knowing before extending it:
 
-**The rival brain** (`src/ai.js`) runs one breadth-first search per candidate move
-that answers two questions at once — how much open space is reachable that way, and
-how far the nearest pellet is. Space is weighted far above hunger, which is what
-stops them from diving into dead ends the way a naive "walk toward the food" snake
-does. Difficulty tunes the weights plus a probability of playing a deliberately
-random move.
+**A snake is its own trail.** There's no list of body segments — the body *is*
+the path the head has already travelled, trimmed to the snake's current length.
+Eating extends the length, boosting burns it, and the tail point is interpolated
+so it slides instead of popping.
 
-**Movement is simultaneous.** Every snake commits to a direction from the same
-snapshot of the board, then all heads resolve at once — so a tail that is about to
-move out of a cell doesn't block you, and two heads entering the same cell is a real
-head-on trade rather than a first-come-first-served race.
+**Collision is a spatial hash, rebuilt every step.** Trail points are inserted by
+reference (they already exist), so the grid allocates nothing per frame. Points
+near a snake's own head are skipped — that region is covered by the head-to-head
+check instead, which is what makes "longer snake wins" possible.
+
+**The rival brain is a steering behaviour, not a planner.** Each step it fans out
+candidate headings, probes each one for bodies and for the rim, and scores them
+against its current target — the nearest pellet, a rival worth cutting off, or a
+wander point. Survival outweighs appetite, so they arc around obstacles instead
+of driving through them.
+
+**The look** is deliberately not neon: off-white paper, pale watercolour washes, a
+faint dot lattice and a grain overlay, with every moving thing drawn as
+translucent glass. Only pellets, boosting snakes and the rim carry a halo.
 
 ## Tests
 
@@ -102,9 +121,10 @@ head-on trade rather than a first-come-first-served race.
 npm test    # node tests/simulation.test.js
 ```
 
-Covers spawning, 3000 ticks of invariants (nothing overlaps, nothing leaves the
-board), wall/self/body/head-on deaths, rival respawn, wrap mode and the turn buffer.
-`src/game.js` never touches the DOM, so the rules run headless in Node.
+Covers spawning, sixty seconds of invariants, self-overlap being survivable, the
+lethal rim, body and head-on kills, eating, boost mechanics, rate-limited
+free-angle steering, and rival respawn. `src/game.js` never touches the DOM, so
+the rules run headless in Node.
 
 ## Deploy
 
@@ -114,14 +134,11 @@ It's a static site — the repository root *is* the deployable artifact.
 *Settings → Pages → Source* to **GitHub Actions**. `.github/workflows/deploy.yml`
 runs the tests and publishes.
 
-**Netlify** — `netlify.toml` publishes the root with no build command. Connect the
-repo, or `npx netlify deploy --prod`.
+**Netlify** — `netlify.toml` publishes the root with no build command.
 
-**Vercel** — `vercel.json` is included. Connect the repo, or `npx vercel --prod`
-and accept the "no framework" detection.
+**Vercel** — `vercel.json` is included; accept the "no framework" detection.
 
-**Anything else** — Cloudflare Pages, S3, nginx, a USB stick: copy the files and
-serve them. No build, no server-side code.
+**Anything else** — Cloudflare Pages, S3, nginx: copy the files and serve them.
 
 ## License
 

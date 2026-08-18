@@ -1,90 +1,101 @@
 /**
- * Static tuning for the arena.
- * Everything gameplay-facing lives here so balance changes never touch logic.
+ * Tuning for the arena. Distances are world units; the camera decides how many
+ * pixels one unit is worth.
  */
 
-export const GRID = Object.freeze({ cols: 42, rows: 28 });
-
-/** Logical pixel size of one grid cell. The canvas is scaled with CSS. */
-export const CELL = 22;
-
-export const AI_COUNT = 5;
-export const START_LENGTH = 4;
-export const FOOD_TARGET = 10;
-
-/** ms an AI snake stays dead before it slithers back in. */
-export const RESPAWN_DELAY = 2400;
-
-/** ms of "3 · 2 · 1" before the first tick of a round. */
-export const COUNTDOWN = 1900;
-
-export const MAX_PARTICLES = 420;
-
-/** Score awarded to the snake you crash into. Crime pays. */
-export const KILL_BOUNTY = 25;
-
-/**
- * Fraction of its score a rival keeps when it dies. Rivals respawn forever, so
- * without this they'd out-accumulate a one-life player no matter how well you
- * play — and taking someone down would mean nothing in the standings.
- */
-export const DEATH_SCORE_KEPT = 0.5;
-
-export const FOOD_TYPES = Object.freeze({
-  pellet: { value: 10, grow: 1, radius: 0.3, color: '#7cffb2' },
-  remains: { value: 15, grow: 1, radius: 0.36, color: '#ffd166' },
+export const WORLD = Object.freeze({
+  radius: 1550,
+  /** Band inside the rim where rivals turn back and the edge fades in. */
+  edgeWarning: 220,
 });
 
+export const RIVAL_COUNT = 5;
+
+export const SNAKE = Object.freeze({
+  baseRadius: 14,
+  maxRadius: 30,
+  radiusGrowth: 0.3, // radius = base + sqrt(extra length) * this
+
+  speed: 190, // units per second
+  boostSpeed: 340,
+  turnRate: 3.0, // radians per second
+  boostTurnRate: 2.5,
+
+  startLength: 300, // body arc length
+  pathStep: 3.5, // spacing of recorded trail points
+
+  boostDrain: 55, // length burned per second while boosting
+  minBoostLength: 340, // below this, boost simply won't engage
+  boostCrumbEvery: 0.16, // seconds between dropped crumbs
+});
+
+export const FOOD = Object.freeze({
+  count: 340,
+  magnetRadius: 78,
+  magnetSpeed: 320,
+
+  pellet: { radius: 7, value: 10, length: 22 },
+  remains: { radius: 10, value: 16, length: 30 },
+  crumb: { radius: 5.5, value: 5, length: 12 },
+});
+
+/** Soft, illustrated pellet colours — pastel, never fluorescent. */
+export const FOOD_COLORS = Object.freeze([
+  '#f0a89c',
+  '#a8c6e8',
+  '#f2cf94',
+  '#bfb2e0',
+  '#a9cfae',
+  '#eeb7c8',
+]);
+
+export const RESPAWN_DELAY = 2600;
+export const COUNTDOWN = 1600;
+export const MAX_PARTICLES = 380;
+export const KILL_BOUNTY = 25;
+
+/** Fraction of its score a rival keeps when it dies. Rivals respawn; you don't. */
+export const DEATH_SCORE_KEPT = 0.5;
+
 /**
- * tick      — ms per simulation step (lower = faster arena)
- * tuning    — AI brain parameters, see src/ai.js
- *   skill      probability the AI plays its best move instead of a random legal one
- *   hunger     how strongly it beelines for food
- *   safety     extra free cells it wants beyond its own length before committing
- *   riskWeight how much it avoids cells a rival head could reach next tick
- *   jitter     random tiebreak noise, keeps rounds from looking scripted
- *   areaCap    flood-fill budget per candidate move
+ * Difficulty changes rival speed and how they steer.
+ *   caution    weight of "something is in the way"
+ *   hunger     weight of "food is that way"
+ *   aggression how often they try to cut across your path
+ *   lookahead  how far ahead they probe, in world units
+ *   jitter     random tiebreak, keeps them from looking scripted
  */
 export const DIFFICULTY = Object.freeze({
   chill: {
     label: 'Chill',
-    tick: 132,
-    tuning: { skill: 0.72, hunger: 6, safety: 1, riskWeight: 40, jitter: 34, areaCap: 220 },
+    speedScale: 0.9,
+    tuning: { caution: 26, hunger: 16, aggression: 0.12, lookahead: 100, jitter: 7, boost: 0.15 },
   },
   normal: {
     label: 'Normal',
-    tick: 104,
-    tuning: { skill: 0.9, hunger: 9, safety: 3, riskWeight: 70, jitter: 16, areaCap: 320 },
+    speedScale: 1,
+    tuning: { caution: 44, hunger: 22, aggression: 0.34, lookahead: 150, jitter: 4, boost: 0.35 },
   },
   brutal: {
     label: 'Brutal',
-    tick: 82,
-    tuning: { skill: 0.99, hunger: 12, safety: 5, riskWeight: 110, jitter: 6, areaCap: 460 },
+    speedScale: 1.1,
+    tuning: { caution: 62, hunger: 26, aggression: 0.62, lookahead: 205, jitter: 2, boost: 0.6 },
   },
 });
 
+/** Muted, illustrated palette — reads well as translucent glass over paper. */
 export const PLAYER_SKIN = Object.freeze({
   name: 'You',
-  color: '#38f5c8',
-  dark: '#0b5f4e',
+  color: '#0f9c98',
+  soft: '#8ed6d3',
 });
 
-export const AI_SKINS = Object.freeze([
-  { name: 'Vyper', color: '#ff5d8f', dark: '#6d1934' },
-  { name: 'Cobalt', color: '#5b8cff', dark: '#1c3475' },
-  { name: 'Ember', color: '#ff9f45', dark: '#6f4111' },
-  { name: 'Mamba', color: '#b47cff', dark: '#3e2570' },
-  { name: 'Krait', color: '#ffe45e', dark: '#6f610f' },
+export const RIVAL_SKINS = Object.freeze([
+  { name: 'Marlow', color: '#d9705e', soft: '#f0b3a7' },
+  { name: 'Juniper', color: '#5f8fc9', soft: '#adc7e6' },
+  { name: 'Saffron', color: '#d09a41', soft: '#eccf9b' },
+  { name: 'Iris', color: '#9483c9', soft: '#c7bee6' },
+  { name: 'Fern', color: '#67a471', soft: '#b0d3b6' },
 ]);
 
-/** Head positions (as a fraction of the board) used at round start. */
-export const SPAWN_SLOTS = Object.freeze([
-  { fx: 0.18, fy: 0.5, dir: 'right' },
-  { fx: 0.82, fy: 0.5, dir: 'left' },
-  { fx: 0.5, fy: 0.16, dir: 'down' },
-  { fx: 0.5, fy: 0.84, dir: 'up' },
-  { fx: 0.24, fy: 0.18, dir: 'right' },
-  { fx: 0.76, fy: 0.82, dir: 'left' },
-]);
-
-export const STORAGE_KEY = 'serpent-arena/v1';
+export const STORAGE_KEY = 'serpent-arena/v2';
