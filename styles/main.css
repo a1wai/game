@@ -2,16 +2,16 @@
    Dark glass over the void, with the accent doing the lighting. */
 
 :root {
-  --paper: #05070e;
-  --ink: #e4ecfb;
-  --ink-soft: #8ea3c4;
+  --paper: #03050b;
+  --ink: #f0f5ff;
+  --ink-soft: #9db0d0;
   --accent: #3fd3c6;
   --accent-soft: #9df0e6;
   --coral: #f08a76;
-  --glass: rgba(16, 24, 44, 0.72);
-  --glass-line: rgba(150, 180, 255, 0.16);
-  --shadow: 0 16px 40px -18px rgba(0, 0, 0, 0.85);
-  --radius: 16px;
+  --glass: rgba(8, 13, 26, 0.92);
+  --glass-line: rgba(150, 180, 255, 0.28);
+  --shadow: 0 10px 30px -14px rgba(0, 0, 0, 0.95);
+  --radius: 10px;
   --font: ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Inter, sans-serif;
   --mono: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace;
 }
@@ -105,15 +105,14 @@ body {
   background: var(--glass);
   border: 1px solid var(--glass-line);
   border-radius: 999px;
-  backdrop-filter: blur(12px);
   box-shadow: var(--shadow);
   cursor: pointer;
   transition: background 0.16s ease, transform 0.12s ease;
 }
 
 .stat-tab:hover {
-  background: rgba(28, 40, 68, 0.88);
-  border-color: rgba(63, 211, 198, 0.4);
+  background: rgba(14, 22, 42, 0.95);
+  border-color: var(--accent);
 }
 
 .stat-tab:active {
@@ -125,7 +124,7 @@ body {
   height: 9px;
   border-radius: 50%;
   background: var(--accent);
-  box-shadow: 0 0 0 3px rgba(63, 211, 198, 0.18);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 26%, transparent);
 }
 
 .tab-score {
@@ -163,9 +162,8 @@ body {
   background: var(--glass);
   border: 1px solid var(--glass-line);
   border-radius: var(--radius);
-  backdrop-filter: blur(14px);
   box-shadow: var(--shadow);
-  animation: drop 0.18s ease both;
+  animation: drop 0.14s ease both;
 }
 
 @keyframes drop {
@@ -186,7 +184,7 @@ body {
 
 .lb-row {
   display: grid;
-  grid-template-columns: 1rem 0.65rem minmax(0, 1fr) auto 2.6rem;
+  grid-template-columns: 1rem 0.65rem minmax(0, 1fr) auto auto 2.6rem;
   align-items: center;
   gap: 0.4rem;
   padding: 0.32rem 0.42rem;
@@ -197,8 +195,8 @@ body {
 }
 
 .lb-row[data-you='true'] {
-  background: rgba(63, 211, 198, 0.12);
-  border-color: rgba(63, 211, 198, 0.32);
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+  border-color: var(--accent);
 }
 
 .lb-row[data-dead='true'] {
@@ -280,16 +278,15 @@ body {
   color: var(--ink);
   background: var(--glass);
   border: 1px solid var(--glass-line);
-  border-radius: 11px;
-  backdrop-filter: blur(12px);
+  border-radius: 9px;
   box-shadow: var(--shadow);
   cursor: pointer;
   transition: background 0.16s ease, transform 0.12s ease;
 }
 
 .icon-btn:hover {
-  background: rgba(28, 40, 68, 0.9);
-  border-color: rgba(63, 211, 198, 0.4);
+  background: rgba(14, 22, 42, 0.95);
+  border-color: var(--accent);
 }
 
 .icon-btn:active {
@@ -332,9 +329,82 @@ body {
   height: 52px;
   margin: -26px 0 0 -26px;
   border-radius: 50%;
-  background: rgba(63, 211, 198, 0.28);
-  border: 1.5px solid rgba(157, 240, 230, 0.7);
-  box-shadow: 0 0 22px -4px rgba(63, 211, 198, 0.8);
+  background: color-mix(in srgb, var(--accent) 32%, transparent);
+  border: 1.5px solid var(--accent-soft);
+  box-shadow: 0 0 22px -2px var(--accent);
+}
+
+/* ----------------------------------------------------------------- codex */
+
+.codex {
+  width: 100%;
+  text-align: left;
+  border-top: 1px solid var(--glass-line);
+  padding-top: 0.6rem;
+}
+
+.codex summary {
+  cursor: pointer;
+  font-size: 0.7rem;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--accent);
+  list-style: none;
+}
+
+.codex summary::-webkit-details-marker {
+  display: none;
+}
+
+.codex summary::after {
+  content: ' +';
+  opacity: 0.6;
+}
+
+.codex[open] summary::after {
+  content: ' –';
+}
+
+.codex ul {
+  list-style: none;
+  margin: 0.55rem 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+}
+
+.codex li {
+  padding: 0.45rem 0.55rem;
+  border-radius: 7px;
+  background: rgba(150, 180, 255, 0.06);
+  border-left: 2px solid var(--dot, var(--accent));
+  font-size: 0.74rem;
+  line-height: 1.4;
+  color: var(--ink-soft);
+}
+
+.codex .codex-name {
+  display: block;
+  font-weight: 700;
+  color: var(--ink);
+  letter-spacing: 0.02em;
+}
+
+.codex .codex-threat {
+  float: right;
+  font-family: var(--mono);
+  font-size: 0.66rem;
+  color: var(--accent);
+  letter-spacing: 0.1em;
+}
+
+.lb-type {
+  font-size: 0.62rem;
+  color: var(--ink-soft);
+  opacity: 0.75;
+  text-align: right;
 }
 
 /* ------------------------------------------------------------------ feed */
@@ -361,7 +431,6 @@ body {
   background: var(--glass);
   border: 1px solid var(--glass-line);
   border-radius: 999px;
-  backdrop-filter: blur(10px);
   white-space: nowrap;
   animation: feed-in 0.22s ease both;
   transition: opacity 0.35s ease, transform 0.35s ease;
@@ -380,7 +449,7 @@ body {
 
 .feed-line[data-tone='good'] {
   color: var(--accent-soft);
-  border-color: rgba(63, 211, 198, 0.4);
+  border-color: var(--accent);
 }
 
 .feed-line[data-tone='good'] b {
@@ -419,8 +488,7 @@ body {
   display: grid;
   place-items: center;
   padding: 1rem;
-  background: rgba(5, 7, 14, 0.68);
-  backdrop-filter: blur(7px);
+  background: rgba(3, 5, 11, 0.86);
   transition: opacity 0.2s ease;
   z-index: 10;
 }
@@ -444,10 +512,11 @@ body {
 
 .card {
   padding: clamp(1.2rem, 4vw, 1.9rem);
-  background: linear-gradient(180deg, rgba(22, 32, 56, 0.9), rgba(12, 18, 34, 0.92));
-  border: 1px solid rgba(150, 180, 255, 0.16);
-  border-radius: 22px;
-  box-shadow: 0 30px 70px -30px rgba(0, 0, 0, 0.9), 0 0 0 1px rgba(255, 255, 255, 0.03) inset;
+  background: #080d1a;
+  border: 1px solid var(--glass-line);
+  border-top: 2px solid var(--accent);
+  border-radius: 12px;
+  box-shadow: 0 30px 70px -28px rgba(0, 0, 0, 0.95);
 }
 
 .overlay[data-screen='start'] #screen-start,
@@ -476,9 +545,10 @@ body {
 .screen h1,
 .screen h2 {
   margin: 0;
-  font-size: clamp(1.6rem, 5vw, 2.2rem);
-  letter-spacing: -0.02em;
-  background: linear-gradient(120deg, #ffffff, #b9ecff 55%, var(--accent));
+  font-size: clamp(1.7rem, 5vw, 2.3rem);
+  letter-spacing: -0.03em;
+  text-transform: uppercase;
+  background: linear-gradient(120deg, #ffffff, var(--accent-soft) 55%, var(--accent));
   -webkit-background-clip: text;
   background-clip: text;
   color: transparent;
@@ -487,9 +557,9 @@ body {
 .lede {
   margin: 0;
   color: var(--ink-soft);
-  font-size: 0.88rem;
-  line-height: 1.6;
-  max-width: 38ch;
+  font-size: 0.86rem;
+  line-height: 1.55;
+  max-width: 40ch;
 }
 
 .lede strong {
@@ -511,8 +581,8 @@ body {
   letter-spacing: 0.12em;
   text-transform: uppercase;
   font-weight: 700;
-  color: #04201d;
-  background: linear-gradient(120deg, var(--accent), #9df0e6);
+  color: #03050b;
+  background: var(--accent);
 }
 
 .field {
@@ -534,8 +604,9 @@ body {
   grid-template-columns: repeat(3, 1fr);
   gap: 3px;
   padding: 3px;
-  border-radius: 12px;
-  background: rgba(150, 180, 255, 0.07);
+  border-radius: 9px;
+  background: rgba(150, 180, 255, 0.08);
+  border: 1px solid var(--glass-line);
 }
 
 .segmented label {
@@ -553,17 +624,19 @@ body {
 .segmented span {
   display: block;
   padding: 0.46rem 0.25rem;
-  border-radius: 9px;
-  font-size: 0.85rem;
-  font-weight: 600;
+  border-radius: 6px;
+  font-size: 0.8rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
   color: var(--ink-soft);
-  transition: all 0.15s ease;
+  transition: all 0.12s ease;
 }
 
 .segmented input:checked + span {
-  color: #04201d;
-  background: linear-gradient(120deg, var(--accent), #7ee7db);
-  box-shadow: 0 8px 22px -10px var(--accent);
+  color: #03050b;
+  background: var(--accent);
+  box-shadow: 0 0 18px -4px var(--accent);
 }
 
 .segmented input:focus-visible + span {
@@ -577,22 +650,24 @@ body {
   padding: 0.78rem 1.5rem;
   font: inherit;
   font-weight: 700;
-  font-size: 0.95rem;
-  border-radius: 13px;
+  font-size: 0.92rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  border-radius: 8px;
   border: 1px solid transparent;
   cursor: pointer;
   transition: transform 0.12s ease, box-shadow 0.18s ease, background 0.18s ease;
 }
 
 .btn.primary {
-  color: #04201d;
-  background: linear-gradient(120deg, var(--accent), #7ee7db);
-  box-shadow: 0 16px 34px -16px rgba(63, 211, 198, 0.8);
+  color: #03050b;
+  background: var(--accent);
+  box-shadow: 0 0 26px -6px var(--accent);
 }
 
 .btn.primary:hover {
   transform: translateY(-1px);
-  box-shadow: 0 20px 42px -14px rgba(63, 211, 198, 0.9);
+  box-shadow: 0 0 34px -4px var(--accent);
 }
 
 .btn.ghost {

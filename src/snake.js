@@ -15,12 +15,20 @@ import { TAU, clamp, turnToward } from './utils.js';
  * a Path2D rather than built into an array first.
  */
 export class Snake {
-  constructor({ id, name, color, soft, isPlayer = false }) {
+  constructor({ id, name, isPlayer = false }) {
     this.id = id;
     this.name = name;
-    this.color = color;
-    this.soft = soft;
     this.isPlayer = isPlayer;
+
+    // Set per round from the session palette.
+    this.color = '#ffffff';
+    this.soft = '#ffffff';
+    this.core = '#ffffff';
+
+    // Set per round from the archetype; the player's stay at 1.
+    this.archetype = null;
+    this.speedScale = 1;
+    this.turnScale = 1;
     /** Who steers: the rival brain, or something outside the simulation. */
     this.autopilot = !isPlayer;
 
@@ -57,10 +65,26 @@ export class Snake {
     this.maxY = 0;
   }
 
+  /** How much boost fuel is left, 0..1 — drawn as a ring around the head. */
+  get energy() {
+    const usable = SNAKE.startLength * 2.2;
+    return Math.max(0, Math.min(1, (this.length - SNAKE.minBoostLength) / usable));
+  }
+
   /** Body half-width. Grows with length, but sub-linearly so giants stay agile. */
   get radius() {
     const extra = Math.max(0, this.length - SNAKE.startLength);
     return Math.min(SNAKE.maxRadius, SNAKE.baseRadius + Math.sqrt(extra) * SNAKE.radiusGrowth);
+  }
+
+  /** Apply a palette entry, and for rivals a personality. */
+  dress(skin, archetype = null) {
+    this.color = skin.color;
+    this.soft = skin.soft;
+    this.core = skin.core;
+    this.archetype = archetype;
+    this.speedScale = archetype ? archetype.speed : 1;
+    this.turnScale = archetype ? archetype.turn : 1;
   }
 
   spawn(x, y, angle) {
@@ -113,12 +137,12 @@ export class Snake {
     const boosting = this.wantsBoost && this.length > SNAKE.minBoostLength;
     this.boosting = boosting;
 
-    const turnRate = boosting ? SNAKE.boostTurnRate : SNAKE.turnRate;
+    const turnRate = (boosting ? SNAKE.boostTurnRate : SNAKE.turnRate) * this.turnScale;
     this.angle = turnToward(this.angle, this.targetAngle, turnRate * dt);
     if (this.angle > Math.PI) this.angle -= TAU;
     else if (this.angle < -Math.PI) this.angle += TAU;
 
-    this.speed = (boosting ? SNAKE.boostSpeed : SNAKE.speed) * speedScale;
+    this.speed = (boosting ? SNAKE.boostSpeed : SNAKE.speed) * speedScale * this.speedScale;
     this.x += Math.cos(this.angle) * this.speed * dt;
     this.y += Math.sin(this.angle) * this.speed * dt;
 
@@ -166,7 +190,7 @@ export class Snake {
   }
 
   grow(amount) {
-    this.length += amount;
+    this.length = Math.min(SNAKE.maxLength, this.length + amount);
   }
 
   shrink(amount) {

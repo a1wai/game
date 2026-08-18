@@ -6,8 +6,8 @@ import {
   FOOD,
   FOOD_COLORS,
   DIFFICULTY,
-  PLAYER_SKIN,
-  RIVAL_SKINS,
+  PLAYER_NAME,
+  RIVAL_NAMES,
   RESPAWN_DELAY,
   COUNTDOWN,
   MAX_PARTICLES,
@@ -17,6 +17,8 @@ import {
 import { Snake } from './snake.js';
 import { SpatialGrid } from './grid.js';
 import { steerRival } from './ai.js';
+import { makePalette } from './palette.js';
+import { assignArchetype } from './archetypes.js';
 import { TAU, pick, randRange } from './utils.js';
 
 /** Simulation runs on a fixed step so physics stays identical at any framerate. */
@@ -43,15 +45,20 @@ const FOOD_GRID_SLACK = 28;
 export class Game {
   constructor() {
     this.snakes = [];
-    this.player = new Snake({ id: 0, ...PLAYER_SKIN, isPlayer: true });
+    this.player = new Snake({ id: 0, name: PLAYER_NAME, isPlayer: true });
     this.snakes.push(this.player);
     for (let i = 0; i < SNAKE_COUNT - 1; i++) {
-      this.snakes.push(new Snake({ id: i + 1, ...RIVAL_SKINS[i % RIVAL_SKINS.length] }));
+      this.snakes.push(new Snake({ id: i + 1, name: RIVAL_NAMES[i % RIVAL_NAMES.length] }));
     }
+    /** Regenerated every round, so no two sessions look alike. */
+    this.palette = makePalette(SNAKE_COUNT - 1);
+    this.dress();
 
     this.food = [];
     this.clusters = [];
     this.particles = [];
+    /** Expanding rings from kills and spawns — the "pop". */
+    this.shockwaves = [];
     this.bodyGrid = new SpatialGrid(96);
     this.foodGrid = new SpatialGrid(160);
     this.listeners = new Map();
@@ -73,6 +80,20 @@ export class Game {
     /** Progress through the current step, for render interpolation. */
     this.alpha = 1;
     this.result = null;
+  }
+
+  /** Hand out fresh colours and personalities. */
+  dress(newPalette = false) {
+    if (newPalette) this.palette = makePalette(SNAKE_COUNT - 1);
+    this.player.dress(this.palette.player, null);
+    let rival = 0;
+    for (const snake of this.snakes) {
+      if (snake.isPlayer) continue;
+      snake.dress(this.palette.rivals[rival], assignArchetype(rival));
+      snake.home = null;
+      rival++;
+    }
+    this.foodColors = this.palette.food;
   }
 
   /* ------------------------------------------------------------------ *
@@ -101,7 +122,9 @@ export class Game {
 
     this.food.length = 0;
     this.particles.length = 0;
+    this.shockwaves.length = 0;
     this.intent = { angle: null, boost: false };
+    this.dress(true); // new colours every round
     this.seedClusters();
 
     // Scatter everyone across the arena with room to breathe.
@@ -135,6 +158,7 @@ export class Game {
    * behind it instead of a blank sheet. Nothing moves until start().
    */
   preview() {
+    this.dress(true);
     this.seedClusters();
     this.food.length = 0;
     const placed = [];
@@ -144,7 +168,13 @@ export class Game {
       snake.reset();
       snake.spawn(Math.cos(angle) * radius, Math.sin(angle) * radius, angle + Math.PI * 0.8);
       snake.grow(220 + i * 60);
-      for (let step = 0; step < 110; step++) snake.advance(1 / 60);
+      // Curve them as they lay their bodies down — straight sticks make a
+      // dull backdrop.
+      const bend = (i % 2 ? 1 : -1) * randRange(0.4, 1.1);
+      for (let step = 0; step < 130; step++) {
+        snake.targetAngle = snake.angle + bend;
+        snake.advance(1 / 60);
+      }
       snake.updateBounds();
       placed.push(snake);
     });
@@ -231,6 +261,7 @@ export class Game {
       bodyGrid: this.bodyGrid,
       foodGrid: this.foodGrid,
       snakes: this.snakes,
+      clusters: this.clusters,
       tuning: this.difficulty.tuning,
       dt,
     };
@@ -304,7 +335,8 @@ export class Game {
       if (d < snake.radius + item.radius) {
         item.gone = true;
         eaten++;
-        snake.grow(item.length);
+        const greed = snake.archetype ? snake.archetype.greed : 1;
+        snake.grow(item.length * greed);
         snake.score += item.value;
         this.burst(item.x, item.y, item.color, 4, 45);
         this.emit('eat', { snake, kind: item.kind });
@@ -402,7 +434,8 @@ export class Game {
     }
 
     this.dropRemains(snake);
-    this.burst(snake.x, snake.y, snake.color, 30, 190);
+    this.burst(snake.x, snake.y, snake.core, 42, 260);
+    this.shockwave(snake.x, snake.y, snake.color, snake.radius * 9);
     this.emit('death', { snake, ...info });
 
     if (snake.isPlayer) {
@@ -442,7 +475,8 @@ export class Game {
       return;
     }
     snake.spawn(spot.x, spot.y, spot.angle);
-    this.burst(spot.x, spot.y, snake.soft, 16, 80);
+    this.burst(spot.x, spot.y, snake.soft, 16, 90);
+    this.shockwave(spot.x, spot.y, snake.soft, snake.radius * 5);
     this.emit('respawn', { snake });
   }
 
@@ -503,7 +537,7 @@ export class Game {
       radius: spec.radius,
       value: spec.value,
       length: spec.length,
-      color: color ?? pick(FOOD_COLORS),
+      color: color ?? pick(this.foodColors ?? FOOD_COLORS),
       seed: Math.random() * 1000,
       gone: false,
     };
@@ -617,7 +651,21 @@ export class Game {
     }
   }
 
+  shockwave(x, y, color, radius) {
+    if (this.shockwaves.length > 24) return;
+    this.shockwaves.push({ x, y, color, radius, life: 620, maxLife: 620 });
+  }
+
   stepParticles(ms) {
+    for (let i = this.shockwaves.length - 1; i >= 0; i--) {
+      const w = this.shockwaves[i];
+      w.life -= ms;
+      if (w.life <= 0) {
+        this.shockwaves[i] = this.shockwaves[this.shockwaves.length - 1];
+        this.shockwaves.pop();
+      }
+    }
+
     const dt = ms / 1000;
     for (let i = this.particles.length - 1; i >= 0; i--) {
       const p = this.particles[i];

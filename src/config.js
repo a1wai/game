@@ -21,17 +21,27 @@ export const SNAKE = Object.freeze({
   maxRadius: 34,
   radiusGrowth: 0.3, // radius = base + sqrt(extra length) * this
 
-  speed: 235, // units per second
-  boostSpeed: 420,
-  turnRate: 3.15, // radians per second
-  boostTurnRate: 2.6,
+  speed: 280, // units per second
+  boostSpeed: 500,
+  turnRate: 3.7, // radians per second — the player's edge is agility
+  boostTurnRate: 3.1,
 
   startLength: 320, // body arc length
+  /**
+   * Ceiling on body length. Radius stops growing long before this, so anything
+   * beyond it is pure wall — a snake long enough to carpet the arena stops
+   * being an opponent and starts being terrain.
+   */
+  maxLength: 6200,
   pathStep: 3.5, // spacing of recorded trail points
 
-  boostDrain: 62, // length burned per second while boosting
-  minBoostLength: 360, // below this, boost simply won't engage
-  boostCrumbEvery: 0.15, // seconds between dropped crumbs
+  /**
+   * Boost is fuel, not a free button: it burns length fast enough that holding
+   * it shrinks you visibly within a second or two.
+   */
+  boostDrain: 105, // length burned per second while boosting
+  minBoostLength: 380, // below this, boost simply won't engage
+  boostCrumbEvery: 0.12, // seconds between dropped crumbs
 
   /** Bounding boxes refresh on this cadence (steps) for cheap view culling. */
   boundsEvery: 15,
@@ -97,29 +107,25 @@ export const DIFFICULTY = Object.freeze({
   },
 });
 
-export const PLAYER_SKIN = Object.freeze({
-  name: 'You',
-  color: '#3fd3c6',
-  soft: '#9df0e6',
-});
+export const PLAYER_NAME = 'You';
 
-/** Fifteen rivals, spaced around the hue wheel so heads stay tellable apart. */
-export const RIVAL_SKINS = Object.freeze([
-  { name: 'Marlow', color: '#f08a76', soft: '#f8c0b2' },
-  { name: 'Juniper', color: '#7aa9f0', soft: '#b6cef7' },
-  { name: 'Saffron', color: '#f0c070', soft: '#f7dcac' },
-  { name: 'Iris', color: '#b9a3f0', soft: '#d8cdf8' },
-  { name: 'Fern', color: '#86c98f', soft: '#bce0c1' },
-  { name: 'Cinder', color: '#e8798f', soft: '#f5b3c1' },
-  { name: 'Quill', color: '#6fc9d6', soft: '#aee3ea' },
-  { name: 'Basil', color: '#a9c96f', soft: '#d2e3ac' },
-  { name: 'Hazel', color: '#e0a06a', soft: '#f0cbab' },
-  { name: 'Indigo', color: '#8f92e8', soft: '#c0c2f3' },
-  { name: 'Willow', color: '#71cfab', soft: '#aee7d1' },
-  { name: 'Pepper', color: '#e88fc4', soft: '#f4c2e0' },
-  { name: 'Nimbus', color: '#9fb4d6', soft: '#c9d6e9' },
-  { name: 'Rusk', color: '#d69c86', soft: '#ebc7b8' },
-  { name: 'Onyx', color: '#8ea3b8', soft: '#bccada' },
+/** Rival names. Their colours are generated fresh every round. */
+export const RIVAL_NAMES = Object.freeze([
+  'Marlow',
+  'Juniper',
+  'Saffron',
+  'Iris',
+  'Fern',
+  'Cinder',
+  'Quill',
+  'Basil',
+  'Hazel',
+  'Indigo',
+  'Willow',
+  'Pepper',
+  'Nimbus',
+  'Rusk',
+  'Onyx',
 ]);
 
-export const STORAGE_KEY = 'serpent-arena/v3';
+export const STORAGE_KEY = 'serpent-arena/v4';

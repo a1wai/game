@@ -17,10 +17,10 @@ import { TAU, clamp, lerp, mulberry32 } from './utils.js';
  * stays smooth on any display.
  */
 
-const VOID = '#05070e';
-const ARENA = '#0a1020';
-const DOT = 'rgba(150, 180, 255, 0.055)';
-const INK = 'rgba(214, 228, 255, 0.55)';
+const VOID = '#03050b';
+const ARENA = '#070c18';
+const DOT = 'rgba(150, 180, 255, 0.07)';
+const INK = 'rgba(226, 238, 255, 0.7)';
 
 /** Deep colour clouds, drawn additively so they read as light, not paint. */
 const WASH = [
@@ -48,6 +48,18 @@ export class Renderer {
     this.nebula = null;
     this.sprites = new Map();
     this.overlay = null;
+    this.bloom = null;
+    this.bloomCtx = null;
+
+    /**
+     * Quality auto-tunes to the machine. Bloom is gorgeous on a GPU and far too
+     * expensive on a software rasteriser, so it's switched on the measured cost
+     * of drawing a frame rather than assumed. Frame *interval* can't be used —
+     * vsync pins it at 16.7ms and hides how much headroom is left.
+     */
+    this.drawCost = 4;
+    this.bloomOn = true;
+    this.bloomTrials = 0;
   }
 
   resize(width, height) {
@@ -60,6 +72,15 @@ export class Renderer {
     this.canvas.style.width = `${width}px`;
     this.canvas.style.height = `${height}px`;
     this.overlay = null;
+
+    // Quarter-resolution bloom buffer. Downscaling is the blur; scaling it back
+    // up and adding it is the glow. Two blits, and it makes everything pop.
+    const bw = Math.max(1, Math.round((width * dpr) / BLOOM_DIVISOR));
+    const bh = Math.max(1, Math.round((height * dpr) / BLOOM_DIVISOR));
+    if (!this.bloom) this.bloom = document.createElement('canvas');
+    this.bloom.width = bw;
+    this.bloom.height = bh;
+    this.bloomCtx = this.bloom.getContext('2d');
   }
 
   /* ------------------------------------------------------------------ *
@@ -67,6 +88,19 @@ export class Renderer {
    * ------------------------------------------------------------------ */
 
   draw(game, camera, time) {
+    const started = performance.now();
+    this.paint(game, camera, time);
+
+    // Rolling average of what a frame actually costs us.
+    this.drawCost += (performance.now() - started - this.drawCost) * 0.06;
+    if (this.bloomOn && this.drawCost > 9 && ++this.bloomTrials > 45) {
+      this.bloomOn = false; // this machine can't afford it; everything else stays
+      this.bloomTrials = 0;
+      this.drawCost = 4;
+    }
+  }
+
+  paint(game, camera, time) {
     const ctx = this.ctx;
     const { width, height, dpr } = this;
     const alpha = game.alpha;
@@ -86,10 +120,12 @@ export class Renderer {
     this.drawFood(ctx, game, camera, time);
     this.drawSnakes(ctx, game, camera, time, alpha);
     this.drawParticles(ctx, game);
+    this.drawShockwaves(ctx, game);
     this.drawRim(ctx, camera, time);
 
     ctx.restore();
 
+    if (this.bloomOn) this.applyBloom(ctx);
     this.drawOverlay(ctx);
     this.drawOffscreenMarkers(ctx, game, camera, alpha);
     this.drawMinimap(ctx, game, camera);
@@ -295,29 +331,38 @@ export class Renderer {
     const path = new Path2D();
     snake.traceInto(path, rx, ry, stride);
 
-    // 1. Halo, additively — this is the glow, and it swells while boosting.
+    // 1. Dark casing. On a near-black floor this is what separates one snake
+    //    from another where they cross, and it makes the colour read as solid.
+    ctx.globalAlpha = 0.95;
+    ctx.strokeStyle = CASING;
+    ctx.lineWidth = r * 2 + 7;
+    ctx.stroke(path);
+
+    // 2. Halo, additive but only along the body — this is the glow that
+    //    survives when bloom is off, and it swells while boosting.
     ctx.globalCompositeOperation = 'lighter';
-    ctx.globalAlpha = snake.boosting ? 0.24 + Math.sin(time / 80) * 0.05 : 0.12;
+    ctx.globalAlpha = snake.boosting ? 0.3 : 0.16;
     ctx.strokeStyle = snake.soft;
-    ctx.lineWidth = r * 2 + (snake.boosting ? 26 : 15);
+    ctx.lineWidth = r * 2 + (snake.boosting ? 24 : 13);
     ctx.stroke(path);
     ctx.globalCompositeOperation = 'source-over';
 
-    // 2. Glass body: a stronger rim colour with a softer fill inside it.
-    ctx.globalAlpha = 0.52;
+    // 3. Body, at high opacity — contrast over glassiness.
+    ctx.globalAlpha = 0.92;
     ctx.strokeStyle = snake.color;
     ctx.lineWidth = r * 2;
     ctx.stroke(path);
 
-    ctx.globalAlpha = 0.34;
+    // 4. Lighter inner band for volume.
+    ctx.globalAlpha = 0.55;
     ctx.strokeStyle = snake.soft;
-    ctx.lineWidth = Math.max(2, r * 2 - 7);
+    ctx.lineWidth = Math.max(2, r * 1.15);
     ctx.stroke(path);
 
-    // 3. Specular line down the middle.
-    ctx.globalAlpha = 0.2;
-    ctx.strokeStyle = '#ffffff';
-    ctx.lineWidth = Math.max(1.2, r * 0.5);
+    // 5. Bright filament down the middle. This is what the bloom picks up.
+    ctx.globalAlpha = snake.boosting ? 1 : 0.85;
+    ctx.strokeStyle = snake.core;
+    ctx.lineWidth = Math.max(1.4, r * (snake.boosting ? 0.45 : 0.32));
     ctx.stroke(path);
 
     ctx.globalAlpha = 1;
@@ -330,59 +375,90 @@ export class Renderer {
     const cos = Math.cos(angle);
     const sin = Math.sin(angle);
 
-    if (snake.isPlayer) {
-      const pulse = 1 + Math.sin(time / 420) * 0.05;
-      ctx.globalAlpha = 0.3;
-      ctx.strokeStyle = snake.soft;
-      ctx.lineWidth = 2;
-      ctx.beginPath();
-      ctx.arc(rx, ry, r * 1.8 * pulse, 0, TAU);
-      ctx.stroke();
-    }
+    ctx.globalAlpha = 0.95;
+    ctx.fillStyle = CASING;
+    ctx.beginPath();
+    ctx.arc(rx, ry, r * 1.16, 0, TAU);
+    ctx.fill();
 
-    ctx.globalAlpha = 0.62;
+    ctx.globalAlpha = 0.95;
     ctx.fillStyle = snake.color;
     ctx.beginPath();
     ctx.arc(rx, ry, r * 1.04, 0, TAU);
     ctx.fill();
 
-    ctx.globalAlpha = 0.45;
-    ctx.fillStyle = snake.soft;
+    ctx.globalAlpha = 0.7;
+    ctx.fillStyle = snake.core;
     ctx.beginPath();
-    ctx.arc(rx, ry, r * 0.8, 0, TAU);
+    ctx.arc(rx, ry, r * 0.62, 0, TAU);
     ctx.fill();
 
-    ctx.globalAlpha = 0.35;
-    ctx.fillStyle = '#ffffff';
-    ctx.beginPath();
-    ctx.arc(rx - r * 0.3, ry - r * 0.36, r * 0.3, 0, TAU);
-    ctx.fill();
+    // Boost fuel, as a ring that empties while you hold it down.
+    if (snake.isPlayer) {
+      const energy = snake.energy;
+      ctx.globalAlpha = 0.18;
+      ctx.strokeStyle = snake.soft;
+      ctx.lineWidth = 3;
+      ctx.beginPath();
+      ctx.arc(rx, ry, r * 2, 0, TAU);
+      ctx.stroke();
+
+      if (energy > 0) {
+        ctx.globalAlpha = snake.boosting ? 1 : 0.75;
+        ctx.strokeStyle = energy < 0.25 ? LOW_FUEL : snake.core;
+        ctx.lineWidth = 3.5;
+        ctx.beginPath();
+        ctx.arc(rx, ry, r * 2, -Math.PI / 2, -Math.PI / 2 + TAU * energy);
+        ctx.stroke();
+      }
+    }
 
     ctx.globalAlpha = 1;
     for (let side = -1; side <= 1; side += 2) {
-      const ex = rx + cos * r * 0.34 - sin * side * r * 0.52;
-      const ey = ry + sin * r * 0.34 + cos * side * r * 0.52;
-      ctx.fillStyle = '#f2f7ff';
+      const ex = rx + cos * r * 0.34 - sin * side * r * 0.5;
+      const ey = ry + sin * r * 0.34 + cos * side * r * 0.5;
+      ctx.fillStyle = '#ffffff';
       ctx.beginPath();
-      ctx.arc(ex, ey, r * 0.29, 0, TAU);
+      ctx.arc(ex, ey, r * 0.3, 0, TAU);
       ctx.fill();
-      ctx.fillStyle = '#0a1020';
+      ctx.fillStyle = CASING;
       ctx.beginPath();
-      ctx.arc(ex + cos * r * 0.1, ey + sin * r * 0.1, r * 0.15, 0, TAU);
+      ctx.arc(ex + cos * r * 0.12, ey + sin * r * 0.12, r * 0.16, 0, TAU);
       ctx.fill();
     }
 
-    // Name tag at a constant on-screen size.
+    // Name, and for rivals the personality you're up against.
     const scale = 1 / camera.zoom;
     ctx.save();
     ctx.translate(rx, ry + r * 2.5);
     ctx.scale(scale, scale);
-    ctx.font = '600 12px ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif';
     ctx.textAlign = 'center';
     ctx.textBaseline = 'top';
+    ctx.font = '700 12px ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif';
     ctx.fillStyle = INK;
     ctx.fillText(snake.name, 0, 0);
+    if (snake.archetype) {
+      ctx.font = '600 10px ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif';
+      ctx.fillStyle = snake.soft;
+      ctx.globalAlpha = 0.75;
+      ctx.fillText(snake.archetype.label, 0, 14);
+      ctx.globalAlpha = 1;
+    }
     ctx.restore();
+  }
+
+  /** Expanding rings from kills and spawns. */
+  drawShockwaves(ctx, game) {
+    for (const w of game.shockwaves) {
+      const t = 1 - w.life / w.maxLife;
+      ctx.globalAlpha = (1 - t) * 0.7;
+      ctx.strokeStyle = w.color;
+      ctx.lineWidth = Math.max(1, 7 * (1 - t));
+      ctx.beginPath();
+      ctx.arc(w.x, w.y, w.radius * (0.2 + t * 0.9), 0, TAU);
+      ctx.stroke();
+    }
+    ctx.globalAlpha = 1;
   }
 
   drawParticles(ctx, game) {
@@ -390,7 +466,7 @@ export class Renderer {
     ctx.globalCompositeOperation = 'lighter';
     for (let i = 0; i < particles.length; i++) {
       const p = particles[i];
-      ctx.globalAlpha = clamp(p.life / p.maxLife, 0, 1) * 0.55;
+      ctx.globalAlpha = clamp(p.life / p.maxLife, 0, 1) * 0.85;
       ctx.fillStyle = p.color;
       ctx.beginPath();
       ctx.arc(p.x, p.y, p.size, 0, TAU);
@@ -448,6 +524,29 @@ export class Renderer {
       ctx.fill();
     }
     ctx.globalAlpha = 1;
+  }
+
+  /**
+   * Add a blurred copy of the frame back over itself. Everything bright — cores,
+   * pellets, shockwaves — blooms; the near-black floor contributes almost
+   * nothing, which is what keeps the contrast high.
+   */
+  applyBloom(ctx) {
+    const bctx = this.bloomCtx;
+    if (!bctx) return;
+    const bw = this.bloom.width;
+    const bh = this.bloom.height;
+
+    bctx.setTransform(1, 0, 0, 1, 0, 0);
+    bctx.globalCompositeOperation = 'copy'; // overwrites, so no clear needed
+    bctx.drawImage(this.canvas, 0, 0, bw, bh);
+
+    ctx.save();
+    ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
+    ctx.globalCompositeOperation = 'lighter';
+    ctx.globalAlpha = BLOOM_STRENGTH;
+    ctx.drawImage(this.bloom, 0, 0, this.width, this.height);
+    ctx.restore();
   }
 
   /**
@@ -530,6 +629,14 @@ export class Renderer {
 
 /** Sprite radius as a multiple of the pellet's own radius. */
 const SPRITE_SCALE = 3.2;
+
+/** Bloom buffer is 1/N the size of the canvas; N is also the blur radius. */
+const BLOOM_DIVISOR = 6;
+const BLOOM_STRENGTH = 0.62;
+
+/** Casing colour behind every body, for separation where snakes cross. */
+const CASING = '#03050b';
+const LOW_FUEL = '#ff6b5e';
 
 /** Edge of the baked arena texture, in pixels. */
 const NEBULA_SIZE = 2048;
