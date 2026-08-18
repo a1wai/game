@@ -1,31 +1,40 @@
-import { WORLD, SNAKE, COUNTDOWN } from './config.js';
-import { TAU, clamp, mulberry32 } from './utils.js';
+import { WORLD, SNAKE, FOOD, COUNTDOWN } from './config.js';
+import { TAU, clamp, lerp, mulberry32 } from './utils.js';
 
 /**
- * Canvas painter.
+ * Canvas painter, dark build.
  *
- * The look is illustrated paper rather than arcade neon: an off-white sheet,
- * pale watercolour washes, a faint dot lattice and a grain overlay. Everything
- * that moves is drawn as translucent glass — bodies let the background through,
- * and only a few things (pellets, boosting snakes, the rim) carry a soft halo.
+ * Performance notes, because this runs at 60fps with sixteen snakes and a few
+ * thousand pellets on screen-sized canvases:
+ *   - Pellets are pre-rendered to sprites, one per colour, and blitted. No
+ *     per-pellet gradients or path work.
+ *   - Each body is traced once into a Path2D and stroked four times, and trail
+ *     points are skipped when they'd land less than a pixel or two apart.
+ *   - Snakes and pellets outside the view are culled before any drawing.
+ *   - Nothing here allocates per frame: no arrays, no objects, no closures in
+ *     the hot loops.
+ * Positions are interpolated between simulation steps, so a 60Hz simulation
+ * stays smooth on any display.
  */
 
-const PAPER = '#e9edf4';
-const ARENA = '#fcfdff';
-const DOT = 'rgba(38, 54, 82, 0.075)';
-const INK = 'rgba(48, 63, 92, 0.62)';
-const RIM = 'rgba(196, 108, 88, 1)';
+const VOID = '#05070e';
+const ARENA = '#0a1020';
+const DOT = 'rgba(150, 180, 255, 0.055)';
+const INK = 'rgba(214, 228, 255, 0.55)';
 
+/** Deep colour clouds, drawn additively so they read as light, not paint. */
 const WASH = [
-  'rgba(255, 214, 199, ALPHA)',
-  'rgba(199, 226, 246, ALPHA)',
-  'rgba(214, 240, 213, ALPHA)',
-  'rgba(230, 220, 246, ALPHA)',
-  'rgba(255, 240, 209, ALPHA)',
-  'rgba(252, 216, 228, ALPHA)',
+  'rgba(64, 118, 224, ALPHA)',
+  'rgba(52, 186, 176, ALPHA)',
+  'rgba(146, 96, 220, ALPHA)',
+  'rgba(220, 126, 104, ALPHA)',
+  'rgba(72, 156, 232, ALPHA)',
+  'rgba(198, 92, 152, ALPHA)',
 ];
 
-const DOT_SPACING = 96;
+const DOT_SPACING = 130;
+const DUST_SPACING = 170;
+const DUST_PARALLAX = 0.55;
 
 export class Renderer {
   constructor(canvas) {
@@ -36,10 +45,9 @@ export class Renderer {
     this.height = 0;
 
     this.washes = buildWashes();
-    this.washGradients = null; // built lazily, once, in world space
-    this.glows = new Map(); // colour -> unit-radius radial gradient
-    this.grain = null;
-    this.grainPattern = null;
+    this.nebula = null;
+    this.sprites = new Map();
+    this.overlay = null;
   }
 
   resize(width, height) {
@@ -51,31 +59,40 @@ export class Renderer {
     this.canvas.height = Math.round(height * dpr);
     this.canvas.style.width = `${width}px`;
     this.canvas.style.height = `${height}px`;
+    this.overlay = null;
   }
+
+  /* ------------------------------------------------------------------ *
+   * frame
+   * ------------------------------------------------------------------ */
 
   draw(game, camera, time) {
     const ctx = this.ctx;
     const { width, height, dpr } = this;
+    const alpha = game.alpha;
 
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    ctx.fillStyle = PAPER;
+    ctx.fillStyle = VOID;
     ctx.fillRect(0, 0, width, height);
 
+    this.drawDust(ctx, camera);
+
     ctx.save();
-    ctx.translate(width / 2, height / 2);
+    ctx.translate(width / 2 + camera.shakeX, height / 2 + camera.shakeY);
     ctx.scale(camera.zoom, camera.zoom);
     ctx.translate(-camera.x, -camera.y);
 
-    this.drawArena(ctx, camera, time);
-    this.drawFood(game, camera, time);
-    this.drawSnakes(game, camera, time);
-    this.drawParticles(game);
-    this.drawRim(ctx, time);
+    this.drawArena(ctx, camera);
+    this.drawFood(ctx, game, camera, time);
+    this.drawSnakes(ctx, game, camera, time, alpha);
+    this.drawParticles(ctx, game);
+    this.drawRim(ctx, camera, time);
 
     ctx.restore();
 
-    this.drawGrain(ctx);
-    this.drawMinimap(ctx, game);
+    this.drawOverlay(ctx);
+    this.drawOffscreenMarkers(ctx, game, camera, alpha);
+    this.drawMinimap(ctx, game, camera);
     if (game.countdown > 0) this.drawCountdown(ctx, game);
   }
 
@@ -83,152 +100,158 @@ export class Renderer {
    * background
    * ------------------------------------------------------------------ */
 
-  drawArena(ctx, camera, time) {
+  /** Slow-moving dust, one parallax layer behind the world, for depth. */
+  drawDust(ctx, camera) {
+    const { width, height, dpr } = this;
     ctx.save();
-    ctx.beginPath();
-    ctx.arc(0, 0, WORLD.radius, 0, TAU);
-    ctx.fillStyle = ARENA;
-    ctx.fill();
-    ctx.clip();
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.translate(width / 2 + camera.shakeX, height / 2 + camera.shakeY);
+    ctx.scale(camera.zoom, camera.zoom);
+    ctx.translate(-camera.x * DUST_PARALLAX, -camera.y * DUST_PARALLAX);
 
-    // Watercolour washes — built once in world space, so they scroll with the map.
-    if (!this.washGradients) {
-      this.washGradients = this.washes.map((w) => {
-        const grad = ctx.createRadialGradient(w.x, w.y, 0, w.x, w.y, w.radius);
-        grad.addColorStop(0, w.color.replace('ALPHA', w.alpha.toFixed(2)));
-        grad.addColorStop(0.65, w.color.replace('ALPHA', (w.alpha * 0.45).toFixed(2)));
-        grad.addColorStop(1, w.color.replace('ALPHA', '0'));
-        return { grad, ...w };
-      });
-    }
-    const view = camera.visibleRect(220);
-    for (const wash of this.washGradients) {
-      if (
-        wash.x + wash.radius < view.minX ||
-        wash.x - wash.radius > view.maxX ||
-        wash.y + wash.radius < view.minY ||
-        wash.y - wash.radius > view.maxY
-      ) {
-        continue;
+    const halfW = width / 2 / camera.zoom;
+    const halfH = height / 2 / camera.zoom;
+    const cx = camera.x * DUST_PARALLAX;
+    const cy = camera.y * DUST_PARALLAX;
+    const minX = Math.floor((cx - halfW) / DUST_SPACING);
+    const maxX = Math.ceil((cx + halfW) / DUST_SPACING);
+    const minY = Math.floor((cy - halfH) / DUST_SPACING);
+    const maxY = Math.ceil((cy + halfH) / DUST_SPACING);
+
+    // Three brightness tiers, one path each — cheaper than per-dot styling.
+    for (let tier = 0; tier < 2; tier++) {
+      ctx.fillStyle = `rgba(180, 205, 255, ${0.06 + tier * 0.06})`;
+      ctx.beginPath();
+      for (let gx = minX; gx <= maxX; gx++) {
+        for (let gy = minY; gy <= maxY; gy++) {
+          const h = hash2(gx, gy);
+          if (h % 2 !== tier) continue;
+          const x = (gx + ((h >>> 8) & 255) / 255) * DUST_SPACING;
+          const y = (gy + ((h >>> 16) & 255) / 255) * DUST_SPACING;
+          const r = 0.8 + (((h >>> 24) & 255) / 255) * 1.7;
+          ctx.moveTo(x + r, y);
+          ctx.arc(x, y, r, 0, TAU);
+        }
       }
-      ctx.fillStyle = wash.grad;
-      ctx.fillRect(
-        wash.x - wash.radius,
-        wash.y - wash.radius,
-        wash.radius * 2,
-        wash.radius * 2,
-      );
+      ctx.fill();
     }
-
-    this.drawDots(ctx, view);
     ctx.restore();
   }
 
-  drawDots(ctx, view) {
+  /**
+   * The arena floor — disc, colour clouds and rim band — is baked once into a
+   * single texture and blitted. Soft gradients tolerate upscaling perfectly, so
+   * this trades a few full-screen gradient fills per frame for one image copy.
+   */
+  drawArena(ctx, camera) {
+    const R = WORLD.radius;
+    if (!this.nebula) this.nebula = buildNebula(this.washes);
+
+    const view = camera.visibleRect(0);
+    const x0 = Math.max(view.minX, -R);
+    const x1 = Math.min(view.maxX, R);
+    const y0 = Math.max(view.minY, -R);
+    const y1 = Math.min(view.maxY, R);
+    if (x1 > x0 && y1 > y0) {
+      const toTex = NEBULA_SIZE / (2 * R);
+      ctx.drawImage(
+        this.nebula,
+        (x0 + R) * toTex,
+        (y0 + R) * toTex,
+        (x1 - x0) * toTex,
+        (y1 - y0) * toTex,
+        x0,
+        y0,
+        x1 - x0,
+        y1 - y0,
+      );
+    }
+
+    // The lattice stays vector so it's crisp at any zoom.
     const startX = Math.floor(view.minX / DOT_SPACING) * DOT_SPACING;
     const startY = Math.floor(view.minY / DOT_SPACING) * DOT_SPACING;
+    const limit = (R - 6) * (R - 6);
     ctx.fillStyle = DOT;
     ctx.beginPath();
     for (let x = startX; x <= view.maxX; x += DOT_SPACING) {
       for (let y = startY; y <= view.maxY; y += DOT_SPACING) {
-        ctx.moveTo(x + 1.8, y);
-        ctx.arc(x, y, 1.8, 0, TAU);
+        if (x * x + y * y > limit) continue;
+        ctx.moveTo(x + 1.7, y);
+        ctx.arc(x, y, 1.7, 0, TAU);
       }
     }
     ctx.fill();
   }
 
-  /** A soft warning band and a hairline where the world stops. */
-  drawRim(ctx, time) {
-    const band = ctx.createRadialGradient(
-      0,
-      0,
-      WORLD.radius - WORLD.edgeWarning,
-      0,
-      0,
-      WORLD.radius,
+  drawRim(ctx, camera, time) {
+    const view = camera.visibleRect(0);
+    const nearest = Math.min(
+      Math.hypot(view.minX, view.minY),
+      Math.hypot(view.maxX, view.minY),
+      Math.hypot(view.minX, view.maxY),
+      Math.hypot(view.maxX, view.maxY),
     );
-    band.addColorStop(0, 'rgba(196, 108, 88, 0)');
-    band.addColorStop(1, 'rgba(196, 108, 88, 0.16)');
-    ctx.save();
+    if (nearest > WORLD.radius) return; // the edge line is off screen
+
+    const pulse = 0.42 + Math.sin(time / 900) * 0.08;
+    ctx.strokeStyle = `rgba(240, 138, 118, ${pulse.toFixed(2)})`;
+    ctx.lineWidth = 4;
     ctx.beginPath();
     ctx.arc(0, 0, WORLD.radius, 0, TAU);
-    ctx.fillStyle = band;
-    ctx.fill();
-
-    const pulse = 0.34 + Math.sin(time / 900) * 0.06;
-    ctx.strokeStyle = RIM.replace('1)', `${pulse.toFixed(2)})`);
-    ctx.lineWidth = 3;
     ctx.stroke();
-    ctx.restore();
-  }
-
-  drawGrain(ctx) {
-    if (!this.grainPattern) {
-      this.grain = buildGrain();
-      this.grainPattern = ctx.createPattern(this.grain, 'repeat');
-    }
-    ctx.save();
-    ctx.globalAlpha = 0.5;
-    ctx.fillStyle = this.grainPattern;
-    ctx.fillRect(0, 0, this.width, this.height);
-    ctx.restore();
   }
 
   /* ------------------------------------------------------------------ *
    * food
    * ------------------------------------------------------------------ */
 
-  glowFor(ctx, color) {
-    let grad = this.glows.get(color);
-    if (!grad) {
-      grad = ctx.createRadialGradient(0, 0, 0, 0, 0, 1);
-      grad.addColorStop(0, hexToRgba(color, 0.42));
-      grad.addColorStop(0.45, hexToRgba(color, 0.16));
-      grad.addColorStop(1, hexToRgba(color, 0));
-      this.glows.set(color, grad);
-    }
-    return grad;
+  /** One pre-rendered sprite per colour: glow, body and highlight baked in. */
+  spriteFor(color) {
+    let sprite = this.sprites.get(color);
+    if (sprite) return sprite;
+
+    const size = 128;
+    const canvas = document.createElement('canvas');
+    canvas.width = size;
+    canvas.height = size;
+    const c = canvas.getContext('2d');
+    const mid = size / 2;
+    const bodyR = mid / SPRITE_SCALE;
+
+    const glow = c.createRadialGradient(mid, mid, 0, mid, mid, mid);
+    glow.addColorStop(0, rgba(color, 0.5));
+    glow.addColorStop(0.3, rgba(color, 0.18));
+    glow.addColorStop(1, rgba(color, 0));
+    c.fillStyle = glow;
+    c.fillRect(0, 0, size, size);
+
+    c.fillStyle = rgba(color, 0.92);
+    c.beginPath();
+    c.arc(mid, mid, bodyR, 0, TAU);
+    c.fill();
+
+    c.fillStyle = 'rgba(255, 255, 255, 0.55)';
+    c.beginPath();
+    c.arc(mid - bodyR * 0.3, mid - bodyR * 0.32, bodyR * 0.34, 0, TAU);
+    c.fill();
+
+    sprite = canvas;
+    this.sprites.set(color, sprite);
+    return sprite;
   }
 
-  drawFood(game, camera, time) {
-    const ctx = this.ctx;
-    const view = camera.visibleRect(40);
+  drawFood(ctx, game, camera, time) {
+    const view = camera.visibleRect(60);
+    const food = game.food;
 
-    for (const item of game.food) {
+    for (let i = 0; i < food.length; i++) {
+      const item = food[i];
       if (item.x < view.minX || item.x > view.maxX || item.y < view.minY || item.y > view.maxY) {
         continue;
       }
-      const pulse = 1 + Math.sin(time / 420 + item.seed) * 0.12;
-      const r = item.radius * pulse;
-
-      // Soft halo — this is the "glow", kept gentle so it reads as light, not neon.
-      ctx.save();
-      ctx.translate(item.x, item.y);
-      ctx.scale(r * 3.1, r * 3.1);
-      ctx.fillStyle = this.glowFor(ctx, item.color);
-      ctx.beginPath();
-      ctx.arc(0, 0, 1, 0, TAU);
-      ctx.fill();
-      ctx.restore();
-
-      ctx.globalAlpha = 0.62;
-      ctx.fillStyle = item.color;
-      ctx.beginPath();
-      ctx.arc(item.x, item.y, r, 0, TAU);
-      ctx.fill();
-
-      ctx.globalAlpha = 0.5;
-      ctx.strokeStyle = item.color;
-      ctx.lineWidth = 1.2;
-      ctx.stroke();
-
-      ctx.globalAlpha = 0.7;
-      ctx.fillStyle = '#ffffff';
-      ctx.beginPath();
-      ctx.arc(item.x - r * 0.3, item.y - r * 0.34, r * 0.28, 0, TAU);
-      ctx.fill();
-      ctx.globalAlpha = 1;
+      const pulse = 1 + Math.sin(time / 420 + item.seed) * 0.1;
+      const size = item.radius * 2 * SPRITE_SCALE * pulse;
+      ctx.drawImage(this.spriteFor(item.color), item.x - size / 2, item.y - size / 2, size, size);
     }
   }
 
@@ -236,122 +259,123 @@ export class Renderer {
    * snakes
    * ------------------------------------------------------------------ */
 
-  drawSnakes(game, camera, time) {
-    for (const snake of game.snakes) {
-      if (!snake.alive || snake.path.length < 2 || snake.isPlayer) continue;
-      this.drawSnake(snake, camera, time);
-    }
-    if (game.player.alive && game.player.path.length >= 2) {
-      this.drawSnake(game.player, camera, time);
-    }
-  }
-
-  drawSnake(snake, camera, time) {
-    const ctx = this.ctx;
-    const points = snake.outline();
-    const r = snake.radius;
+  drawSnakes(ctx, game, camera, time, alpha) {
+    const view = camera.visibleRect(120);
+    // Long snakes can move a fair way between bounds refreshes.
+    const slack = SNAKE.boostSpeed * (SNAKE.boundsEvery / 60) + SNAKE.maxRadius;
 
     ctx.lineJoin = 'round';
     ctx.lineCap = 'round';
 
-    const trace = () => {
-      ctx.beginPath();
-      ctx.moveTo(points[0].x, points[0].y);
-      for (let i = 1; i < points.length; i++) ctx.lineTo(points[i].x, points[i].y);
-      ctx.stroke();
-    };
+    for (const snake of game.snakes) {
+      if (!snake.alive || snake.path.length < 2 || snake.isPlayer) continue;
+      if (
+        snake.maxX + slack < view.minX ||
+        snake.minX - slack > view.maxX ||
+        snake.maxY + slack < view.minY ||
+        snake.minY - slack > view.maxY
+      ) {
+        continue;
+      }
+      this.drawSnake(ctx, snake, camera, time, alpha);
+    }
 
-    // 1. Grounding shadow, so the glass body sits on the paper.
-    ctx.save();
-    ctx.translate(0, r * 0.34);
-    ctx.strokeStyle = 'rgba(43, 58, 86, 0.10)';
-    ctx.lineWidth = r * 2;
-    trace();
-    ctx.restore();
-
-    // 2. Halo. Always soft; brighter while boosting.
-    ctx.globalAlpha = snake.boosting ? 0.3 + Math.sin(time / 90) * 0.06 : 0.16;
-    ctx.strokeStyle = snake.soft;
-    ctx.lineWidth = r * 2 + (snake.boosting ? 22 : 13);
-    trace();
-
-    // 3. Glass body: a stronger rim colour with a softer fill inside it.
-    ctx.globalAlpha = 0.58;
-    ctx.strokeStyle = snake.color;
-    ctx.lineWidth = r * 2;
-    trace();
-
-    ctx.globalAlpha = 0.45;
-    ctx.strokeStyle = snake.soft;
-    ctx.lineWidth = Math.max(2, r * 2 - 5.5);
-    trace();
-
-    // 4. Specular line down the middle.
-    ctx.globalAlpha = 0.34;
-    ctx.strokeStyle = '#ffffff';
-    ctx.lineWidth = Math.max(1.5, r * 0.62);
-    trace();
-
-    ctx.globalAlpha = 1;
-    this.drawHead(snake, camera, time);
+    if (game.player.alive && game.player.path.length >= 2) {
+      this.drawSnake(ctx, game.player, camera, time, alpha);
+    }
   }
 
-  drawHead(snake, camera, time) {
-    const ctx = this.ctx;
+  drawSnake(ctx, snake, camera, time, alpha) {
+    const rx = lerp(snake.prevX, snake.x, alpha);
+    const ry = lerp(snake.prevY, snake.y, alpha);
     const r = snake.radius;
-    const cos = Math.cos(snake.angle);
-    const sin = Math.sin(snake.angle);
+
+    // Skip trail points that would land closer than ~2px on screen.
+    const stride = clamp(Math.round(2.2 / (SNAKE.pathStep * camera.zoom)), 1, 4);
+    const path = new Path2D();
+    snake.traceInto(path, rx, ry, stride);
+
+    // 1. Halo, additively — this is the glow, and it swells while boosting.
+    ctx.globalCompositeOperation = 'lighter';
+    ctx.globalAlpha = snake.boosting ? 0.24 + Math.sin(time / 80) * 0.05 : 0.12;
+    ctx.strokeStyle = snake.soft;
+    ctx.lineWidth = r * 2 + (snake.boosting ? 26 : 15);
+    ctx.stroke(path);
+    ctx.globalCompositeOperation = 'source-over';
+
+    // 2. Glass body: a stronger rim colour with a softer fill inside it.
+    ctx.globalAlpha = 0.52;
+    ctx.strokeStyle = snake.color;
+    ctx.lineWidth = r * 2;
+    ctx.stroke(path);
+
+    ctx.globalAlpha = 0.34;
+    ctx.strokeStyle = snake.soft;
+    ctx.lineWidth = Math.max(2, r * 2 - 7);
+    ctx.stroke(path);
+
+    // 3. Specular line down the middle.
+    ctx.globalAlpha = 0.2;
+    ctx.strokeStyle = '#ffffff';
+    ctx.lineWidth = Math.max(1.2, r * 0.5);
+    ctx.stroke(path);
+
+    ctx.globalAlpha = 1;
+    this.drawHead(ctx, snake, camera, time, rx, ry, alpha);
+  }
+
+  drawHead(ctx, snake, camera, time, rx, ry, alpha) {
+    const r = snake.radius;
+    const angle = lerp(snake.prevAngle, snake.angle, alpha);
+    const cos = Math.cos(angle);
+    const sin = Math.sin(angle);
 
     if (snake.isPlayer) {
       const pulse = 1 + Math.sin(time / 420) * 0.05;
       ctx.globalAlpha = 0.3;
-      ctx.strokeStyle = snake.color;
+      ctx.strokeStyle = snake.soft;
       ctx.lineWidth = 2;
       ctx.beginPath();
-      ctx.arc(snake.x, snake.y, r * 1.75 * pulse, 0, TAU);
+      ctx.arc(rx, ry, r * 1.8 * pulse, 0, TAU);
       ctx.stroke();
     }
 
-    ctx.globalAlpha = 0.55;
+    ctx.globalAlpha = 0.62;
     ctx.fillStyle = snake.color;
     ctx.beginPath();
-    ctx.arc(snake.x, snake.y, r * 1.04, 0, TAU);
+    ctx.arc(rx, ry, r * 1.04, 0, TAU);
     ctx.fill();
 
-    ctx.globalAlpha = 0.5;
+    ctx.globalAlpha = 0.45;
     ctx.fillStyle = snake.soft;
     ctx.beginPath();
-    ctx.arc(snake.x, snake.y, r * 0.82, 0, TAU);
+    ctx.arc(rx, ry, r * 0.8, 0, TAU);
     ctx.fill();
 
-    // Glass highlight, up and to the left like a lit sphere.
-    ctx.globalAlpha = 0.5;
+    ctx.globalAlpha = 0.35;
     ctx.fillStyle = '#ffffff';
     ctx.beginPath();
-    ctx.arc(snake.x - r * 0.3, snake.y - r * 0.36, r * 0.3, 0, TAU);
+    ctx.arc(rx - r * 0.3, ry - r * 0.36, r * 0.3, 0, TAU);
     ctx.fill();
 
-    // Eyes, looking where the snake is going.
-    const px = -sin;
-    const py = cos;
     ctx.globalAlpha = 1;
-    for (const side of [-1, 1]) {
-      const ex = snake.x + cos * r * 0.34 + px * side * r * 0.52;
-      const ey = snake.y + sin * r * 0.34 + py * side * r * 0.52;
-      ctx.fillStyle = '#fdfeff';
+    for (let side = -1; side <= 1; side += 2) {
+      const ex = rx + cos * r * 0.34 - sin * side * r * 0.52;
+      const ey = ry + sin * r * 0.34 + cos * side * r * 0.52;
+      ctx.fillStyle = '#f2f7ff';
       ctx.beginPath();
       ctx.arc(ex, ey, r * 0.29, 0, TAU);
       ctx.fill();
-      ctx.fillStyle = 'rgba(38, 50, 74, 0.9)';
+      ctx.fillStyle = '#0a1020';
       ctx.beginPath();
       ctx.arc(ex + cos * r * 0.1, ey + sin * r * 0.1, r * 0.15, 0, TAU);
       ctx.fill();
     }
 
-    // Name tag — keeps a constant size on screen regardless of zoom.
+    // Name tag at a constant on-screen size.
     const scale = 1 / camera.zoom;
     ctx.save();
-    ctx.translate(snake.x, snake.y + r * 2.5);
+    ctx.translate(rx, ry + r * 2.5);
     ctx.scale(scale, scale);
     ctx.font = '600 12px ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif';
     ctx.textAlign = 'center';
@@ -361,46 +385,122 @@ export class Renderer {
     ctx.restore();
   }
 
-  drawParticles(game) {
-    const ctx = this.ctx;
-    for (const p of game.particles) {
-      ctx.globalAlpha = clamp(p.life / p.maxLife, 0, 1) * 0.6;
+  drawParticles(ctx, game) {
+    const particles = game.particles;
+    ctx.globalCompositeOperation = 'lighter';
+    for (let i = 0; i < particles.length; i++) {
+      const p = particles[i];
+      ctx.globalAlpha = clamp(p.life / p.maxLife, 0, 1) * 0.55;
       ctx.fillStyle = p.color;
       ctx.beginPath();
       ctx.arc(p.x, p.y, p.size, 0, TAU);
       ctx.fill();
     }
     ctx.globalAlpha = 1;
+    ctx.globalCompositeOperation = 'source-over';
   }
 
   /* ------------------------------------------------------------------ *
    * screen-space overlays
    * ------------------------------------------------------------------ */
 
-  drawMinimap(ctx, game) {
-    const size = Math.min(96, Math.max(64, this.width * 0.08));
+  /** Where the rivals you can't see are — essential in an arena this size. */
+  drawOffscreenMarkers(ctx, game, camera, alpha) {
+    const player = game.player;
+    if (!player.alive) return;
+
+    const halfW = this.width / 2;
+    const halfH = this.height / 2;
+    const inset = 26;
+    const range = 3400;
+
+    for (const snake of game.snakes) {
+      if (!snake.alive || snake.isPlayer) continue;
+      const sx = lerp(snake.prevX, snake.x, alpha);
+      const sy = lerp(snake.prevY, snake.y, alpha);
+      const dx = sx - camera.x;
+      const dy = sy - camera.y;
+
+      const screenX = dx * camera.zoom;
+      const screenY = dy * camera.zoom;
+      if (Math.abs(screenX) < halfW - inset && Math.abs(screenY) < halfH - inset) continue;
+
+      const distance = Math.hypot(dx, dy);
+      if (distance > range) continue;
+
+      // Push the marker onto the screen border along the same bearing.
+      const scale = Math.min(
+        (halfW - inset) / Math.max(1, Math.abs(screenX)),
+        (halfH - inset) / Math.max(1, Math.abs(screenY)),
+      );
+      const mx = halfW + screenX * scale;
+      const my = halfH + screenY * scale;
+      const fade = clamp(1 - distance / range, 0.12, 0.75);
+
+      ctx.globalAlpha = fade;
+      ctx.fillStyle = snake.color;
+      ctx.beginPath();
+      ctx.arc(mx, my, 4.5, 0, TAU);
+      ctx.fill();
+      ctx.globalAlpha = fade * 0.35;
+      ctx.beginPath();
+      ctx.arc(mx, my, 9, 0, TAU);
+      ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  /**
+   * Vignette and film grain never change, so they're baked into one screen-sized
+   * layer at resize and blitted once per frame. A repeating pattern fill over
+   * the whole viewport every frame is one of the most expensive things you can
+   * ask a rasteriser to do.
+   */
+  drawOverlay(ctx) {
+    if (!this.overlay) this.overlay = buildOverlay(this.width, this.height, this.dpr);
+    ctx.drawImage(this.overlay, 0, 0, this.width, this.height);
+  }
+
+  drawMinimap(ctx, game, camera) {
+    const size = clamp(this.width * 0.09, 76, 118);
     const margin = 18;
     const cx = this.width - margin - size / 2;
     const cy = this.height - margin - size / 2;
     const scale = size / 2 / WORLD.radius;
 
     ctx.save();
-    ctx.globalAlpha = 0.62;
     ctx.beginPath();
     ctx.arc(cx, cy, size / 2, 0, TAU);
-    ctx.fillStyle = 'rgba(255,255,255,0.75)';
+    ctx.fillStyle = 'rgba(10, 16, 32, 0.72)';
     ctx.fill();
-    ctx.strokeStyle = 'rgba(48, 63, 92, 0.25)';
+    ctx.strokeStyle = 'rgba(150, 180, 255, 0.25)';
     ctx.lineWidth = 1;
     ctx.stroke();
+    ctx.clip();
 
-    ctx.globalAlpha = 1;
+    // Food fields, so the map hints at where it's worth going.
+    ctx.fillStyle = 'rgba(120, 210, 190, 0.16)';
+    ctx.beginPath();
+    for (const cluster of game.clusters) {
+      const r = Math.max(1.2, cluster.radius * scale);
+      ctx.moveTo(cx + cluster.x * scale + r, cy + cluster.y * scale);
+      ctx.arc(cx + cluster.x * scale, cy + cluster.y * scale, r, 0, TAU);
+    }
+    ctx.fill();
+
+    // What the camera can currently see.
+    const viewW = (this.width / camera.zoom) * scale;
+    const viewH = (this.height / camera.zoom) * scale;
+    ctx.strokeStyle = 'rgba(214, 228, 255, 0.35)';
+    ctx.lineWidth = 1;
+    ctx.strokeRect(cx + camera.x * scale - viewW / 2, cy + camera.y * scale - viewH / 2, viewW, viewH);
+
     for (const snake of game.snakes) {
       if (!snake.alive) continue;
       ctx.fillStyle = snake.color;
-      ctx.globalAlpha = snake.isPlayer ? 1 : 0.65;
+      ctx.globalAlpha = snake.isPlayer ? 1 : 0.7;
       ctx.beginPath();
-      ctx.arc(cx + snake.x * scale, cy + snake.y * scale, snake.isPlayer ? 3.4 : 2.2, 0, TAU);
+      ctx.arc(cx + snake.x * scale, cy + snake.y * scale, snake.isPlayer ? 3.4 : 2.1, 0, TAU);
       ctx.fill();
     }
     ctx.restore();
@@ -415,8 +515,8 @@ export class Renderer {
     ctx.translate(this.width / 2, this.height / 2);
     ctx.scale(1.3 - within * 0.3, 1.3 - within * 0.3);
     ctx.globalAlpha = Math.min(1, 0.3 + within);
-    ctx.fillStyle = 'rgba(48, 63, 92, 0.72)';
-    ctx.font = '700 96px ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif';
+    ctx.fillStyle = 'rgba(226, 238, 255, 0.9)';
+    ctx.font = '700 104px ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif';
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
     ctx.fillText(String(n), 0, 0);
@@ -428,25 +528,102 @@ export class Renderer {
  * one-off assets
  * -------------------------------------------------------------------- */
 
-/** Stable pastel washes scattered across the arena. */
+/** Sprite radius as a multiple of the pellet's own radius. */
+const SPRITE_SCALE = 3.2;
+
+/** Edge of the baked arena texture, in pixels. */
+const NEBULA_SIZE = 2048;
+
+/** Paint the whole arena floor once, at a resolution soft clouds can afford. */
+function buildNebula(washes) {
+  const canvas = document.createElement('canvas');
+  canvas.width = NEBULA_SIZE;
+  canvas.height = NEBULA_SIZE;
+  const ctx = canvas.getContext('2d');
+
+  const scale = NEBULA_SIZE / (2 * WORLD.radius);
+  ctx.setTransform(scale, 0, 0, scale, NEBULA_SIZE / 2, NEBULA_SIZE / 2);
+
+  ctx.beginPath();
+  ctx.arc(0, 0, WORLD.radius, 0, TAU);
+  ctx.fillStyle = ARENA;
+  ctx.fill();
+  ctx.clip();
+
+  ctx.globalCompositeOperation = 'lighter';
+  for (const wash of washes) {
+    const grad = ctx.createRadialGradient(wash.x, wash.y, 0, wash.x, wash.y, wash.radius);
+    grad.addColorStop(0, wash.color.replace('ALPHA', wash.alpha.toFixed(3)));
+    grad.addColorStop(0.55, wash.color.replace('ALPHA', (wash.alpha * 0.4).toFixed(3)));
+    grad.addColorStop(1, wash.color.replace('ALPHA', '0'));
+    ctx.fillStyle = grad;
+    ctx.fillRect(wash.x - wash.radius, wash.y - wash.radius, wash.radius * 2, wash.radius * 2);
+  }
+  ctx.globalCompositeOperation = 'source-over';
+
+  const band = ctx.createRadialGradient(
+    0,
+    0,
+    WORLD.radius - WORLD.edgeWarning,
+    0,
+    0,
+    WORLD.radius,
+  );
+  band.addColorStop(0, 'rgba(232, 116, 96, 0)');
+  band.addColorStop(1, 'rgba(232, 116, 96, 0.22)');
+  ctx.fillStyle = band;
+  ctx.fillRect(-WORLD.radius, -WORLD.radius, WORLD.radius * 2, WORLD.radius * 2);
+
+  return canvas;
+}
+
 function buildWashes() {
   const random = mulberry32(20260818);
   const washes = [];
-  for (let i = 0; i < 12; i++) {
+  for (let i = 0; i < 46; i++) {
     const angle = random() * TAU;
-    const radius = Math.sqrt(random()) * WORLD.radius * 0.92;
+    const radius = Math.sqrt(random()) * WORLD.radius * 0.95;
     washes.push({
       x: Math.cos(angle) * radius,
       y: Math.sin(angle) * radius,
-      radius: 420 + random() * 760,
+      radius: 900 + random() * 1700,
       color: WASH[Math.floor(random() * WASH.length)],
-      alpha: 0.14 + random() * 0.16,
+      alpha: 0.05 + random() * 0.07,
     });
   }
   return washes;
 }
 
-/** A small tile of paper grain, repeated across the viewport. */
+/** Screen-sized vignette + grain, baked once per resize. */
+function buildOverlay(width, height, dpr) {
+  const canvas = document.createElement('canvas');
+  canvas.width = Math.max(1, Math.round(width * dpr));
+  canvas.height = Math.max(1, Math.round(height * dpr));
+  const ctx = canvas.getContext('2d');
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+  const radius = Math.hypot(width, height) / 2;
+  const grad = ctx.createRadialGradient(
+    width / 2,
+    height / 2,
+    radius * 0.45,
+    width / 2,
+    height / 2,
+    radius,
+  );
+  grad.addColorStop(0, 'rgba(0, 0, 0, 0)');
+  grad.addColorStop(1, 'rgba(0, 0, 0, 0.45)');
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, width, height);
+
+  const pattern = ctx.createPattern(buildGrain(), 'repeat');
+  ctx.globalAlpha = 0.35;
+  ctx.fillStyle = pattern;
+  ctx.fillRect(0, 0, width, height);
+
+  return canvas;
+}
+
 function buildGrain() {
   const size = 128;
   const canvas = document.createElement('canvas');
@@ -456,17 +633,24 @@ function buildGrain() {
   const image = ctx.createImageData(size, size);
   const random = mulberry32(7);
   for (let i = 0; i < image.data.length; i += 4) {
-    const v = 140 + random() * 115;
+    const v = random() * 255;
     image.data[i] = v;
     image.data[i + 1] = v;
     image.data[i + 2] = v;
-    image.data[i + 3] = 12;
+    image.data[i + 3] = 10;
   }
   ctx.putImageData(image, 0, 0);
   return canvas;
 }
 
-function hexToRgba(hex, alpha) {
+/** Stable per-cell noise for the dust lattice. */
+function hash2(x, y) {
+  let h = Math.imul(x, 0x27d4eb2d) ^ Math.imul(y, 0x165667b1);
+  h = Math.imul(h ^ (h >>> 15), 0x2545f491);
+  return (h ^ (h >>> 13)) >>> 0;
+}
+
+function rgba(hex, alpha) {
   const value = hex.replace('#', '');
   const full = value.length === 3 ? value.replace(/./g, (c) => c + c) : value;
   const num = parseInt(full, 16);
