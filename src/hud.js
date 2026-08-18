@@ -54,10 +54,12 @@ export class Hud {
         <span class="lb-rank"></span>
         <span class="lb-dot" aria-hidden="true"></span>
         <span class="lb-name"></span>
+        <span class="lb-type"></span>
         <span class="lb-kills" title="Kills"></span>
         <span class="lb-score"></span>
       `;
       row.querySelector('.lb-name').textContent = snake.name;
+      row.querySelector('.lb-type').textContent = snake.archetype ? snake.archetype.label : '';
       this.el.board.append(row);
       this.rows.set(snake.id, row);
     }

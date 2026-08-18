@@ -1,7 +1,10 @@
 # 🐍 Serpent Arena
 
 Competitive snake, played the way slither.io plays: a vast dark arena, free-angle
-steering, boost, and **fifteen rival snakes** hunting the same food you do.
+steering, boost, and **fifteen rival snakes** hunting the same food you do — each
+of them a different kind of opponent.
+
+Every round generates its own colour scheme, so no two sessions look alike.
 
 You are the only one who stays dead. Rivals respawn seconds after they die, and
 the arena is held at a minimum population, so it never empties out — you get one
@@ -48,8 +51,11 @@ snake keeps its heading.
 
 - **Pellets** are `+10` and a little length. They're pulled in as you pass, so
   you don't have to hit them dead on.
-- **Boost** burns length as fuel and sheds it back into the arena as crumbs. It
-  won't engage once you're short.
+- **Boost is fuel, not a button.** It burns length fast enough that you shrink
+  visibly within a second, and sheds that length back into the arena as crumbs
+  for someone else to eat. The ring around your head is what's left; it turns red
+  when you're nearly out, and boost refuses to engage below the floor. Holding it
+  down is how you lose a lead.
 - **You never collide with yourself.** Loop through your own body as much as you
   like — the only lethal things are rival bodies and the rim.
 - **Ramming a rival's body** is `+25` and a kill. They drop their whole body as
@@ -77,6 +83,36 @@ circles in the middle of the map.
 
 Best score is stored per difficulty in `localStorage`.
 
+## Know your rivals
+
+Every rival is one of five personalities, and they play genuinely differently —
+not just faster or slower. Each has a matching weakness, so taking one down is a
+different problem depending on who it is. They're named on screen and listed in
+the menu.
+
+| Rival    | Plays like                                | How you beat it                                        |
+| -------- | ----------------------------------------- | ------------------------------------------------------ |
+| Hunter   | Comes straight for you and commits        | It turns wide — bait it in, then cut back hard          |
+| Glutton  | Eats everything and gets enormous         | Length is its problem; loop tight around its head       |
+| Skittish | Bolts from anything bigger                | It flees in a straight line — drive it into the rim     |
+| Weaver   | Wanders and jinks, never holds a line     | It stays short; meet it head-on and length wins         |
+| Sentinel | Holds one food field, rarely errs         | It won't leave its field — cut through and force it in  |
+
+Those aren't labels on identical code. Over 150-second rounds the profiles come
+out clearly:
+
+| Rival    | Avg length | Deaths |
+| -------- | ---------- | ------ |
+| Glutton  | 4430       | 14     |
+| Sentinel | 4348       | 15     |
+| Skittish | 3545       | 14     |
+| Hunter   | 2383       | 33     |
+| Weaver   | 2345       | 32     |
+
+Gluttons and Sentinels are simply better snakes; Hunters take risks and pay for
+them. Body length is capped — past a point a snake stops being an opponent and
+starts being terrain.
+
 ## Interface
 
 The canvas fills the window (`F` for real fullscreen). The only permanent UI is
@@ -93,7 +129,9 @@ and a short kill feed for takedowns near you or at the top of the board.
 ```
 index.html               markup + overlay screens
 styles/main.css          chrome around the canvas
-src/config.js            every tuning value (world, speeds, colours, AI weights)
+src/config.js            every tuning value (world, speeds, AI weights)
+src/palette.js           the per-round colour scheme
+src/archetypes.js        rival personalities and their weaknesses
 src/snake.js             one competitor: a head plus the trail behind it
 src/grid.js              uniform spatial hash, rebuilt each step
 src/ai.js                rival steering brain
@@ -125,10 +163,19 @@ against its current target — the nearest pellet, a rival worth cutting off, or
 wander point. Survival outweighs appetite, so they arc around obstacles instead
 of driving through them.
 
-**The look** is dark glass: a near-black void, deep colour clouds inside the
-arena, a parallax dust layer, a faint lattice and a grain overlay. Bodies are
-translucent so the background reads through them, and the glow is soft light —
-pellets, boosting snakes and the rim — rather than fluorescent line art.
+**The look** is high contrast on near-black: solid, saturated bodies with a dark
+casing so they separate where they cross, a bright filament down the middle, and
+an additive halo along the length. Colours are generated per round from a random
+base hue, spaced around the wheel by the golden angle so no two rivals are ever
+confusable — and the menu picks up the same accent.
+
+**On three.js:** it isn't used here, and I'd advise against it for this game.
+Three.js is a scene graph for 3D; this is 2D, and the renderer is already pinned
+to vsync with roughly 2x headroom *on a software rasteriser with no GPU at all*
+(measurements below). Adding it would mean ~600KB of dependency and a full
+renderer rewrite to buy performance that isn't missing. The one thing WebGL would
+genuinely give — real bloom — is already here as a cheap Canvas2D pass. If you
+want the port anyway, say so and I'll do it.
 
 ## Performance
 
@@ -137,7 +184,15 @@ it holds — measured in Chromium at 1600x900 and on a phone-sized touch viewpor
 **p50 16.7ms, p95 16.7ms, and effectively zero dropped frames**, with roughly 2x
 headroom left over on a software rasteriser with no GPU at all.
 
-What that took, roughly in order of impact:
+**Quality auto-tunes.** Bloom — a blurred copy of the frame added back over
+itself — looks superb on a GPU and is far too expensive on a software rasteriser,
+where it halved the framerate. So the renderer times its own draw calls and
+switches bloom off if a frame is costing too much. Frame *interval* can't be used
+for this: vsync pins it at 16.7ms and hides how much headroom is left. With bloom
+off the additive halo along each body keeps the glow, so nothing looks broken —
+it just costs less.
+
+The rest, roughly in order of impact:
 
 - **Nothing full-screen is drawn twice.** The arena floor — disc, colour clouds
   and rim band — is baked once into a single texture and blitted; soft gradients

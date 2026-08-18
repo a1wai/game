@@ -5,6 +5,7 @@ import { Hud, safeName } from './hud.js';
 import { Sound } from './audio.js';
 import { Controls } from './input.js';
 import { STORAGE_KEY, DIFFICULTY } from './config.js';
+import { ARCHETYPES } from './archetypes.js';
 import { lerp } from './utils.js';
 import { readStore, writeStore, formatTime } from './utils.js';
 
@@ -45,6 +46,37 @@ document.addEventListener('fullscreenchange', () => {
 resize();
 
 /* ------------------------------------------------------------------ *
+ * palette
+ * ------------------------------------------------------------------ */
+
+/** Push the round's generated colours into the UI so the menu matches the arena. */
+function applyPalette() {
+  const { accent, accentSoft } = game.palette;
+  const root = document.documentElement.style;
+  root.setProperty('--accent', accent);
+  root.setProperty('--accent-soft', accentSoft);
+  document.querySelector('meta[name="theme-color"]')?.setAttribute('content', '#03050b');
+}
+
+/** The rival codex, built from the archetype definitions themselves. */
+function buildCodex() {
+  const list = $('codex-list');
+  list.replaceChildren();
+  for (const type of ARCHETYPES) {
+    const item = document.createElement('li');
+    item.innerHTML = `
+      <span class="codex-threat"></span>
+      <span class="codex-name"></span>
+      <span class="codex-weak"></span>
+    `;
+    item.querySelector('.codex-threat').textContent = '◆'.repeat(type.threat);
+    item.querySelector('.codex-name').textContent = type.label;
+    item.querySelector('.codex-weak').textContent = type.weakness;
+    list.append(item);
+  }
+}
+
+/* ------------------------------------------------------------------ *
  * screens
  * ------------------------------------------------------------------ */
 
@@ -64,6 +96,7 @@ function startGame() {
   sound.unlock();
   controls.release();
   game.start({ difficulty: settings.difficulty });
+  applyPalette(); // fresh colours every round
   camera.snapTo(game.player);
   hud.mount(game);
   hud.toggle(false);
@@ -284,6 +317,8 @@ function frame(now) {
 
 // Show a still of the arena behind the start screen rather than blank paper.
 game.preview();
+applyPalette();
+buildCodex();
 game.player.x = 0;
 game.player.y = 0;
 camera.snapTo(game.player);

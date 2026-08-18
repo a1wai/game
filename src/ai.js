@@ -21,7 +21,8 @@ const PROBES = [
 ];
 
 export function steerRival(snake, ctx, dt) {
-  const { tuning } = ctx;
+  const tuning = personalise(snake, ctx.tuning);
+  ctx.tuned = tuning;
 
   const target = chooseTarget(snake, ctx);
   const bearing = target ? Math.atan2(target.y - snake.y, target.x - snake.x) : snake.angle;
@@ -55,9 +56,27 @@ export function steerRival(snake, ctx, dt) {
   }
 }
 
+/**
+ * Fold the snake's personality into the difficulty tuning. The result is cached
+ * on the snake so this runs every step without allocating.
+ */
+function personalise(snake, base) {
+  const type = snake.archetype;
+  if (!type) return base;
+  const t = snake.tuned ?? (snake.tuned = {});
+  t.caution = base.caution * type.caution;
+  t.hunger = base.hunger;
+  t.aggression = base.aggression * type.aggression;
+  t.lookahead = base.lookahead * type.lookahead;
+  t.jitter = base.jitter * (type.id === 'weaver' ? 3.5 : 1);
+  t.boost = base.boost * type.boost;
+  return t;
+}
+
 /** Weighted count of trouble along a heading: bodies first, then the rim. */
 function dangerAlong(snake, angle, ctx) {
-  const { bodyGrid, tuning } = ctx;
+  const { bodyGrid } = ctx;
+  const tuning = ctx.tuned ?? ctx.tuning;
   const cos = Math.cos(angle);
   const sin = Math.sin(angle);
   const clearance = snake.radius + 18;
@@ -87,10 +106,21 @@ function dangerAlong(snake, angle, ctx) {
  * point it holds for a few seconds.
  */
 function chooseTarget(snake, ctx) {
-  const { foodGrid, snakes, tuning } = ctx;
+  const { foodGrid, snakes, clusters } = ctx;
+  const tuning = ctx.tuned ?? ctx.tuning;
+  const type = snake.archetype;
 
   snake.chaseUntil = (snake.chaseUntil ?? 0) - ctx.dt;
   snake.targetHold = (snake.targetHold ?? 0) - ctx.dt;
+
+  // Skittish snakes drop everything and run from anything bigger. That's what
+  // makes them hard to catch — and what makes driving them at the rim work.
+  if (type && type.id === 'skittish') {
+    const threat = nearestThreat(snake, snakes, 560);
+    if (threat) {
+      return { x: snake.x + (snake.x - threat.x) * 3, y: snake.y + (snake.y - threat.y) * 3 };
+    }
+  }
 
   // Aggression: aim at where a smaller rival is about to be, not where it is.
   if (snake.chaseUntil <= 0 && Math.random() < tuning.aggression * ctx.dt * 2) {
@@ -141,15 +171,54 @@ function chooseTarget(snake, ctx) {
     return best;
   }
 
-  // Nothing nearby — pick a spot and cruise.
+  // Nothing nearby — cruise. Sentinels patrol one food field and never leave it;
+  // everyone else picks a fresh spot across the arena.
   snake.wanderUntil = (snake.wanderUntil ?? 0) - ctx.dt;
   if (!snake.wander || snake.wanderUntil <= 0 || unreachable(snake, snake.wander.x, snake.wander.y)) {
-    const angle = Math.random() * TAU;
-    const radius = Math.random() * WORLD.radius * 0.8;
-    snake.wander = { x: Math.cos(angle) * radius, y: Math.sin(angle) * radius };
-    snake.wanderUntil = randRange(2, 4.5);
+    if (type && type.id === 'sentinel' && clusters && clusters.length) {
+      if (!snake.home) snake.home = nearestCluster(snake, clusters);
+      const spread = snake.home.radius * 0.9;
+      snake.wander = {
+        x: snake.home.x + randRange(-spread, spread),
+        y: snake.home.y + randRange(-spread, spread),
+      };
+      snake.wanderUntil = randRange(1.5, 3);
+    } else {
+      const angle = Math.random() * TAU;
+      const radius = Math.random() * WORLD.radius * 0.8;
+      snake.wander = { x: Math.cos(angle) * radius, y: Math.sin(angle) * radius };
+      snake.wanderUntil = randRange(2, 4.5);
+    }
   }
   return snake.wander;
+}
+
+function nearestThreat(snake, snakes, range) {
+  let best = null;
+  let bestDist = range * range;
+  for (const other of snakes) {
+    if (!other.alive || other === snake) continue;
+    if (other.length < snake.length * 1.05) continue; // only worry about bigger
+    const d = (other.x - snake.x) ** 2 + (other.y - snake.y) ** 2;
+    if (d < bestDist) {
+      bestDist = d;
+      best = other;
+    }
+  }
+  return best;
+}
+
+function nearestCluster(snake, clusters) {
+  let best = clusters[0];
+  let bestDist = Infinity;
+  for (const cluster of clusters) {
+    const d = (cluster.x - snake.x) ** 2 + (cluster.y - snake.y) ** 2;
+    if (d < bestDist) {
+      bestDist = d;
+      best = cluster;
+    }
+  }
+  return best;
 }
 
 /**

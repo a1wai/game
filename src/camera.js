@@ -37,7 +37,7 @@ export class Camera {
 
   /** Where the camera wants to sit: slightly ahead of the snake. */
   targetPoint(snake, rx, ry) {
-    const lead = Math.min((snake.speed ?? SNAKE.speed) * 0.3, 130);
+    const lead = Math.min((snake.speed ?? SNAKE.speed) * 0.24, 120);
     return { x: rx + Math.cos(snake.angle) * lead, y: ry + Math.sin(snake.angle) * lead };
   }
 
@@ -60,8 +60,9 @@ export class Camera {
 
     // Exponential easing, corrected for frame time so it behaves the same at
     // 60 and 144 Hz.
-    const move = 1 - Math.exp(-7.5 * dt);
-    const zoomEase = 1 - Math.exp(-2.4 * dt);
+    // Tight follow: any lag here reads as input lag, however smooth the frames.
+    const move = 1 - Math.exp(-13 * dt);
+    const zoomEase = 1 - Math.exp(-3 * dt);
     this.x = lerp(this.x, point.x, move);
     this.y = lerp(this.y, point.y, move);
     this.zoom = lerp(this.zoom, this.targetZoom(snake), zoomEase);
