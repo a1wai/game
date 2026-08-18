@@ -7,7 +7,7 @@
  */
 import assert from 'node:assert/strict';
 import { Game } from '../src/game.js';
-import { WORLD, SNAKE, FOOD } from '../src/config.js';
+import { WORLD, SNAKE, SNAKE_COUNT, MIN_ALIVE, FOOD } from '../src/config.js';
 
 let checks = 0;
 const check = (label, fn) => {
@@ -30,7 +30,8 @@ function soloGame() {
   game.food.length = 0;
   game.replenishFood = () => {};
   game.player.spawn(0, 0, 0);
-  game.rebuildGrids();
+  game.rebuildBodyGrid();
+  game.rebuildFoodGrid();
   return game;
 }
 
@@ -49,11 +50,12 @@ function assertInvariants(game) {
 
 console.log('Serpent Arena — simulation');
 
-check('a fresh round spawns six snakes inside the arena, plus food', () => {
+check('a fresh round fills the arena with snakes and food', () => {
   const game = new Game();
   game.start({ difficulty: 'normal' });
-  assert.equal(game.snakes.length, 6);
-  assert.equal(game.aliveCount, 6);
+  assert.equal(game.snakes.length, SNAKE_COUNT);
+  assert.equal(game.aliveCount, SNAKE_COUNT);
+  assert.ok(SNAKE_COUNT >= MIN_ALIVE, 'the roster must be able to satisfy the live minimum');
   assert.equal(game.food.length, FOOD.count);
   assert.equal(game.player.length, SNAKE.startLength);
   for (const snake of game.snakes) {
@@ -73,6 +75,40 @@ check('sixty seconds of rivals-only play stays legal', () => {
       game.countdown = 0;
     }
   }
+});
+
+check('the arena never drops below its minimum population', () => {
+  const game = new Game();
+  game.start({ difficulty: 'brutal' });
+  game.countdown = 0;
+
+  // Wipe out everyone but the player and check the queue refills fast.
+  for (const snake of game.snakes) {
+    if (!snake.isPlayer) game.kill(snake, { cause: 'edge', killer: null });
+  }
+  assert.equal(game.aliveCount, 1);
+
+  let lowest = Infinity;
+  for (let i = 0; i < 1800 && game.running; i++) {
+    game.update(16.67);
+    // Give the refill a moment before holding it to the floor.
+    if (i > 120) lowest = Math.min(lowest, game.aliveCount);
+  }
+  assert.ok(
+    lowest >= MIN_ALIVE,
+    `population fell to ${lowest}, below the minimum of ${MIN_ALIVE}`,
+  );
+});
+
+check('render interpolation state tracks the previous step', () => {
+  const game = soloGame();
+  game.setIntent(0.8, false);
+  game.step(1 / 60);
+  const { prevX, prevY, x, y } = game.player;
+  assert.ok(prevX !== x || prevY !== y, 'previous pose should differ after a step');
+  game.step(1 / 60);
+  assert.equal(game.player.prevX, x, 'previous pose should be last step\'s position');
+  assert.equal(game.player.prevY, y);
 });
 
 check('a snake can cross its own body without dying', () => {
@@ -117,7 +153,8 @@ check('running into a rival ends the run and pays the rival', () => {
 
   const wall = rival.path[Math.floor(rival.path.length / 2)];
   game.player.spawn(wall.x, wall.y - 70, Math.PI / 2); // approach it side-on
-  game.rebuildGrids();
+  game.rebuildBodyGrid();
+  game.rebuildFoodGrid();
 
   for (let i = 0; i < 60 && game.player.alive; i++) {
     game.setIntent(Math.PI / 2, false);
@@ -138,7 +175,8 @@ check('head-on collisions go to the longer snake', () => {
   game.player.spawn(-60, 0, 0);
   game.player.grow(400); // clearly the longer of the two
   rival.spawn(60, 0, Math.PI);
-  game.rebuildGrids();
+  game.rebuildBodyGrid();
+  game.rebuildFoodGrid();
 
   for (let i = 0; i < 60 && game.player.alive && rival.alive; i++) {
     game.setIntent(0, false);
@@ -154,7 +192,8 @@ check('eating grows the snake and scores', () => {
   const game = soloGame();
   const before = { length: game.player.length, score: game.player.score };
   game.addFood(game.player.x + 30, game.player.y, 'pellet');
-  game.rebuildGrids();
+  game.rebuildBodyGrid();
+  game.rebuildFoodGrid();
   for (let i = 0; i < 30 && game.player.score === before.score; i++) {
     game.setIntent(0, false);
     game.step(1 / 60);

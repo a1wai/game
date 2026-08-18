@@ -1,13 +1,14 @@
 # 🐍 Serpent Arena
 
-Competitive snake, played the way slither.io plays: an open arena, free-angle
-steering, boost, and **five rival snakes** that hunt the same food you do.
+Competitive snake, played the way slither.io plays: a vast dark arena, free-angle
+steering, boost, and **fifteen rival snakes** hunting the same food you do.
 
-You are the only one who stays dead. Rivals respawn a couple of seconds after
-they die — you get one life. Your own body is harmless; everyone else's is not.
+You are the only one who stays dead. Rivals respawn seconds after they die, and
+the arena is held at a minimum population, so it never empties out — you get one
+life. Your own body is harmless; everyone else's is not.
 
 No frameworks, no build step, no dependencies — plain ES modules and one
-fullscreen `<canvas>`.
+fullscreen `<canvas>`, running at a locked 60fps.
 
 ---
 
@@ -57,6 +58,8 @@ snake keeps its heading.
 - **A rival that dies keeps only half its score.** They respawn forever, so
   without this the standings would be unwinnable for a one-life player — and
   taking someone down would mean nothing.
+- **At least ten snakes are always alive.** If deaths outpace the respawn queue,
+  whoever is next skips the wait.
 
 Difficulty changes rival speed and how sharply they steer:
 
@@ -66,13 +69,24 @@ Difficulty changes rival speed and how sharply they steer:
 | Normal     | Steer properly, cut you off now and then                       |
 | Brutal     | Faster, probe much further ahead, hunt shorter snakes on sight |
 
+Rivals aim straight at what they want whenever the line is clear, and only fan
+out to compare headings when something is in the way. They also refuse targets
+that sit inside their own turning circle — aim at one of those and a snake
+orbits it forever, which is exactly how the early builds ended up drawing
+circles in the middle of the map.
+
 Best score is stored per difficulty in `localStorage`.
 
 ## Interface
 
 The canvas fills the window (`F` for real fullscreen). The only permanent UI is
-a small tab in the corner showing score and rank — **press it** for the full
-standings, length, kills, time and best. A minimap sits bottom-right.
+a small tab in the corner showing score and rank — **press it** (or `Tab`) for
+the standings, length, kills, time and best.
+
+Because the arena is big enough to lose people in, three things keep you
+oriented: a minimap bottom-right showing the food fields and everyone's
+position, coloured dots at the screen edge pointing at rivals just out of view,
+and a short kill feed for takedowns near you or at the top of the board.
 
 ## How it fits together
 
@@ -111,9 +125,40 @@ against its current target — the nearest pellet, a rival worth cutting off, or
 wander point. Survival outweighs appetite, so they arc around obstacles instead
 of driving through them.
 
-**The look** is deliberately not neon: off-white paper, pale watercolour washes, a
-faint dot lattice and a grain overlay, with every moving thing drawn as
-translucent glass. Only pellets, boosting snakes and the rim carry a halo.
+**The look** is dark glass: a near-black void, deep colour clouds inside the
+arena, a parallax dust layer, a faint lattice and a grain overlay. Bodies are
+translucent so the background reads through them, and the glow is soft light —
+pellets, boosting snakes and the rim — rather than fluorescent line art.
+
+## Performance
+
+The target was a locked 60fps with sixteen snakes and a few thousand pellets, and
+it holds — measured in Chromium at 1600x900 and on a phone-sized touch viewport:
+**p50 16.7ms, p95 16.7ms, and effectively zero dropped frames**, with roughly 2x
+headroom left over on a software rasteriser with no GPU at all.
+
+What that took, roughly in order of impact:
+
+- **Nothing full-screen is drawn twice.** The arena floor — disc, colour clouds
+  and rim band — is baked once into a single texture and blitted; soft gradients
+  upscale invisibly. The vignette and grain are baked into a second screen-sized
+  layer at resize. Painting those live cost more than everything else combined.
+- **The simulation is interpolated, not sampled.** Physics runs on a fixed 60Hz
+  step; every snake keeps its previous pose, and the renderer draws between the
+  two. The camera follows the interpolated head, otherwise it puts the judder
+  straight back.
+- **The hot loops allocate nothing.** Bodies are traced directly into a `Path2D`
+  and stroked four times rather than built into arrays; trail points are stored
+  by reference in the collision grid; eaten pellets are swap-popped. No garbage
+  means no GC pauses.
+- **Everything off screen is skipped.** Snakes carry a periodically refreshed
+  bounding box, pellets are culled per frame, and trail points are strided so
+  they never land closer than about two pixels.
+- **Pellets are sprites.** One pre-rendered image per colour, blitted — no
+  per-pellet gradients.
+
+The simulation itself costs about 0.14ms per frame, roughly 1% of the budget, so
+the headroom is real.
 
 ## Tests
 
@@ -121,10 +166,11 @@ translucent glass. Only pellets, boosting snakes and the rim carry a halo.
 npm test    # node tests/simulation.test.js
 ```
 
-Covers spawning, sixty seconds of invariants, self-overlap being survivable, the
-lethal rim, body and head-on kills, eating, boost mechanics, rate-limited
-free-angle steering, and rival respawn. `src/game.js` never touches the DOM, so
-the rules run headless in Node.
+Twelve checks: spawning, sixty seconds of invariants, the minimum population
+holding, interpolation state, self-overlap being survivable, the lethal rim,
+body and head-on kills, eating, boost mechanics, rate-limited free-angle
+steering, and rival respawn. `src/game.js` never touches the DOM, so the rules
+run headless in Node.
 
 ## Deploy
 

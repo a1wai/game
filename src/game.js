@@ -1,6 +1,7 @@
 import {
   WORLD,
-  RIVAL_COUNT,
+  SNAKE_COUNT,
+  MIN_ALIVE,
   SNAKE,
   FOOD,
   FOOD_COLORS,
@@ -16,7 +17,7 @@ import {
 import { Snake } from './snake.js';
 import { SpatialGrid } from './grid.js';
 import { steerRival } from './ai.js';
-import { TAU, clamp, pick, randRange } from './utils.js';
+import { TAU, pick, randRange } from './utils.js';
 
 /** Simulation runs on a fixed step so physics stays identical at any framerate. */
 const STEP = 1 / 60;
@@ -28,6 +29,14 @@ const COLLIDE_SAMPLE = 3;
 const NECK_POINTS = 6;
 
 /**
+ * Food barely moves, so its grid is rebuilt a few times a second instead of
+ * every step. Queries are widened to cover anything a magnet dragged in the
+ * meantime.
+ */
+const FOOD_GRID_EVERY = 4;
+const FOOD_GRID_SLACK = 28;
+
+/**
  * The arena simulation. Pure state and rules: it never touches the DOM and
  * never draws, so the whole thing runs headless under Node.
  */
@@ -36,18 +45,21 @@ export class Game {
     this.snakes = [];
     this.player = new Snake({ id: 0, ...PLAYER_SKIN, isPlayer: true });
     this.snakes.push(this.player);
-    for (let i = 0; i < RIVAL_COUNT; i++) {
+    for (let i = 0; i < SNAKE_COUNT - 1; i++) {
       this.snakes.push(new Snake({ id: i + 1, ...RIVAL_SKINS[i % RIVAL_SKINS.length] }));
     }
 
     this.food = [];
+    this.clusters = [];
     this.particles = [];
-    this.bodyGrid = new SpatialGrid(64);
-    this.foodGrid = new SpatialGrid(96);
+    this.bodyGrid = new SpatialGrid(96);
+    this.foodGrid = new SpatialGrid(160);
     this.listeners = new Map();
 
     /** What the player is asking for this frame. */
     this.intent = { angle: null, boost: false };
+    /** Scratch list reused every step so the hot loop allocates nothing. */
+    this._alive = [];
 
     this.difficulty = DIFFICULTY.normal;
     this.difficultyKey = 'normal';
@@ -57,6 +69,9 @@ export class Game {
     this.countdown = 0;
     this.elapsed = 0;
     this.acc = 0;
+    this.steps = 0;
+    /** Progress through the current step, for render interpolation. */
+    this.alpha = 1;
     this.result = null;
   }
 
@@ -87,17 +102,20 @@ export class Game {
     this.food.length = 0;
     this.particles.length = 0;
     this.intent = { angle: null, boost: false };
+    this.seedClusters();
 
-    // Spread everyone evenly around a ring, facing the middle.
-    this.snakes.forEach((snake, i) => {
-      const angle = (i / this.snakes.length) * TAU + randRange(-0.2, 0.2);
-      const radius = WORLD.radius * 0.55;
+    // Scatter everyone across the arena with room to breathe.
+    const placed = [];
+    for (const snake of this.snakes) {
+      const spot = this.spreadSpawn(placed, 900);
       snake.reset();
-      snake.spawn(Math.cos(angle) * radius, Math.sin(angle) * radius, angle + Math.PI);
-    });
+      snake.spawn(spot.x, spot.y, spot.angle);
+      placed.push(spot);
+    }
 
     this.replenishFood(true);
-    this.rebuildGrids();
+    this.rebuildBodyGrid();
+    this.rebuildFoodGrid();
 
     this.running = true;
     this.paused = false;
@@ -106,6 +124,8 @@ export class Game {
     this.countdown = COUNTDOWN;
     this.elapsed = 0;
     this.acc = 0;
+    this.steps = 0;
+    this.alpha = 1;
 
     this.emit('start', this);
   }
@@ -115,17 +135,28 @@ export class Game {
    * behind it instead of a blank sheet. Nothing moves until start().
    */
   preview() {
+    this.seedClusters();
     this.food.length = 0;
+    const placed = [];
     this.snakes.forEach((snake, i) => {
       const angle = (i / this.snakes.length) * TAU;
-      const radius = WORLD.radius * 0.5;
+      const radius = 520 + (i % 3) * 260;
       snake.reset();
       snake.spawn(Math.cos(angle) * radius, Math.sin(angle) * radius, angle + Math.PI * 0.8);
-      snake.grow(200 + i * 90);
-      for (let step = 0; step < 90; step++) snake.advance(1 / 60);
+      snake.grow(220 + i * 60);
+      for (let step = 0; step < 110; step++) snake.advance(1 / 60);
+      snake.updateBounds();
+      placed.push(snake);
     });
+    // A pocket of food around the menu view, plus the usual fields.
+    for (let i = 0; i < 220; i++) {
+      const angle = Math.random() * TAU;
+      const radius = Math.sqrt(Math.random()) * 1400;
+      this.addFood(Math.cos(angle) * radius, Math.sin(angle) * radius, 'pellet');
+    }
     this.replenishFood(true);
-    this.rebuildGrids();
+    this.rebuildBodyGrid();
+    this.rebuildFoodGrid();
   }
 
   togglePause(force) {
@@ -155,11 +186,7 @@ export class Game {
     }
 
     this.elapsed += ms;
-    for (const snake of this.snakes) {
-      if (snake.alive || snake.isPlayer) continue;
-      snake.respawnIn -= ms;
-      if (snake.respawnIn <= 0) this.respawn(snake);
-    }
+    this.handleRespawns(ms);
 
     this.acc += ms / 1000;
     let guard = 0;
@@ -167,6 +194,25 @@ export class Game {
       this.acc -= STEP;
       this.step(STEP);
     }
+    this.alpha = this.running ? Math.min(this.acc / STEP, 1) : 1;
+  }
+
+  handleRespawns(ms) {
+    for (const snake of this.snakes) {
+      if (snake.alive || snake.isPlayer) continue;
+      snake.respawnIn -= ms;
+      if (snake.respawnIn <= 0) this.respawn(snake);
+    }
+
+    // Hold the arena at a minimum population: whoever is next in the queue
+    // skips the wait rather than leaving the world feeling empty.
+    if (this.aliveCount >= MIN_ALIVE) return;
+    let soonest = null;
+    for (const snake of this.snakes) {
+      if (snake.alive || snake.isPlayer) continue;
+      if (!soonest || snake.respawnIn < soonest.respawnIn) soonest = snake;
+    }
+    if (soonest) this.respawn(soonest);
   }
 
   /* ------------------------------------------------------------------ *
@@ -174,7 +220,11 @@ export class Game {
    * ------------------------------------------------------------------ */
 
   step(dt) {
-    const alive = this.snakes.filter((s) => s.alive);
+    this.steps++;
+
+    const alive = this._alive;
+    alive.length = 0;
+    for (const snake of this.snakes) if (snake.alive) alive.push(snake);
 
     // 1. Intent. Rivals think; the player's steering arrives from outside.
     const ctx = {
@@ -199,15 +249,19 @@ export class Game {
       if (snake.boosting) this.payForBoost(snake, dt);
     }
 
-    // 3. Refresh the lookup grids against the new positions.
-    this.rebuildGrids();
+    // 3. Refresh the lookup structures against the new positions.
+    this.rebuildBodyGrid();
+    if (this.steps % FOOD_GRID_EVERY === 0) this.rebuildFoodGrid();
+    if (this.steps % SNAKE.boundsEvery === 0) {
+      for (const snake of alive) snake.updateBounds();
+    }
 
     // 4. Eat.
     for (const snake of alive) this.feed(snake, dt);
 
     // 5. Work out who died, then apply it all at once so ties are fair.
     const deaths = this.collide(alive);
-    for (const [snake, info] of deaths) this.kill(snake, info);
+    if (deaths) for (const [snake, info] of deaths) this.kill(snake, info);
 
     this.replenishFood(false);
   }
@@ -231,12 +285,7 @@ export class Game {
       snake.crumbTimer = SNAKE.boostCrumbEvery;
       const tail = snake.path[snake.path.length - 1];
       if (tail) {
-        this.addFood(
-          tail.x + randRange(-6, 6),
-          tail.y + randRange(-6, 6),
-          'crumb',
-          snake.soft,
-        );
+        this.addFood(tail.x + randRange(-6, 6), tail.y + randRange(-6, 6), 'crumb', snake.soft);
       }
     }
   }
@@ -246,18 +295,18 @@ export class Game {
     const reach = FOOD.magnetRadius + snake.radius;
     let eaten = 0;
 
-    this.foodGrid.forEachNear(snake.x, snake.y, reach, (item) => {
+    this.foodGrid.forEachNear(snake.x, snake.y, reach + FOOD_GRID_SLACK, (item) => {
       if (item.gone) return null;
       const dx = snake.x - item.x;
       const dy = snake.y - item.y;
-      const d = Math.hypot(dx, dy);
+      const d = Math.sqrt(dx * dx + dy * dy);
 
       if (d < snake.radius + item.radius) {
         item.gone = true;
         eaten++;
         snake.grow(item.length);
         snake.score += item.value;
-        this.burst(item.x, item.y, item.color, 5, 40);
+        this.burst(item.x, item.y, item.color, 4, 45);
         this.emit('eat', { snake, kind: item.kind });
         return null;
       }
@@ -269,7 +318,16 @@ export class Game {
       return null;
     });
 
-    if (eaten) this.food = this.food.filter((f) => !f.gone);
+    if (eaten) this.compactFood();
+  }
+
+  /** Swap-pop the eaten pellets — no array churn on a list this size. */
+  compactFood() {
+    for (let i = this.food.length - 1; i >= 0; i--) {
+      if (!this.food[i].gone) continue;
+      this.food[i] = this.food[this.food.length - 1];
+      this.food.pop();
+    }
   }
 
   /**
@@ -277,42 +335,53 @@ export class Game {
    * A snake never collides with itself — only rivals and the rim are lethal.
    */
   collide(alive) {
-    const deaths = new Map();
+    let deaths = null;
+    const add = (snake, info) => {
+      if (!deaths) deaths = new Map();
+      if (!deaths.has(snake)) deaths.set(snake, info);
+    };
 
     // Head to head: the longer snake wins, equal lengths take each other out.
     for (let i = 0; i < alive.length; i++) {
+      const a = alive[i];
       for (let j = i + 1; j < alive.length; j++) {
-        const a = alive[i];
         const b = alive[j];
         const reach = a.radius * 0.9 + b.radius * 0.9;
-        if (Math.hypot(a.x - b.x, a.y - b.y) > reach) continue;
-        if (a.length > b.length * 1.02) deaths.set(b, { cause: 'head', killer: a });
-        else if (b.length > a.length * 1.02) deaths.set(a, { cause: 'head', killer: b });
+        const dx = a.x - b.x;
+        const dy = a.y - b.y;
+        if (dx * dx + dy * dy > reach * reach) continue;
+        if (a.length > b.length * 1.02) add(b, { cause: 'head', killer: a });
+        else if (b.length > a.length * 1.02) add(a, { cause: 'head', killer: b });
         else {
-          deaths.set(a, { cause: 'head', killer: null });
-          deaths.set(b, { cause: 'head', killer: null });
+          add(a, { cause: 'head', killer: null });
+          add(b, { cause: 'head', killer: null });
         }
       }
     }
 
     for (const snake of alive) {
-      if (deaths.has(snake)) continue;
+      if (deaths?.has(snake)) continue;
 
-      if (Math.hypot(snake.x, snake.y) > WORLD.radius) {
-        deaths.set(snake, { cause: 'edge', killer: null });
+      if (snake.x * snake.x + snake.y * snake.y > WORLD.radius * WORLD.radius) {
+        add(snake, { cause: 'edge', killer: null });
         continue;
       }
 
-      const hit = this.bodyGrid.forEachNear(snake.x, snake.y, snake.radius + SNAKE.maxRadius, (point) => {
-        if (point.s === snake.id) return null; // you cannot run into yourself
-        const other = this.snakes[point.s];
-        if (!other || !other.alive) return null;
-        const reach = snake.radius * 0.82 + other.radius * 0.86;
-        const dx = point.x - snake.x;
-        const dy = point.y - snake.y;
-        return dx * dx + dy * dy < reach * reach ? other : null;
-      });
-      if (hit) deaths.set(snake, { cause: 'body', killer: hit });
+      const hit = this.bodyGrid.forEachNear(
+        snake.x,
+        snake.y,
+        snake.radius + SNAKE.maxRadius,
+        (point) => {
+          if (point.s === snake.id) return null; // you cannot run into yourself
+          const other = this.snakes[point.s];
+          if (!other || !other.alive) return null;
+          const reach = snake.radius * 0.82 + other.radius * 0.86;
+          const dx = point.x - snake.x;
+          const dy = point.y - snake.y;
+          return dx * dx + dy * dy < reach * reach ? other : null;
+        },
+      );
+      if (hit) add(snake, { cause: 'body', killer: hit });
     }
 
     return deaths;
@@ -333,7 +402,7 @@ export class Game {
     }
 
     this.dropRemains(snake);
-    this.burst(snake.x, snake.y, snake.color, 26, 150);
+    this.burst(snake.x, snake.y, snake.color, 30, 190);
     this.emit('death', { snake, ...info });
 
     if (snake.isPlayer) {
@@ -351,6 +420,7 @@ export class Game {
     this.running = false;
     this.over = true;
     this.paused = false;
+    this.alpha = 1;
     this.result = {
       score: this.player.score,
       rank: this.rankOf(this.player),
@@ -368,47 +438,60 @@ export class Game {
   respawn(snake) {
     const spot = this.findSpawn();
     if (!spot) {
-      snake.respawnIn = 500; // crowded right now, try again shortly
+      snake.respawnIn = 400; // crowded right now, try again shortly
       return;
     }
     snake.spawn(spot.x, spot.y, spot.angle);
-    this.burst(spot.x, spot.y, snake.soft, 14, 70);
+    this.burst(spot.x, spot.y, snake.soft, 16, 80);
     this.emit('respawn', { snake });
-  }
-
-  /** Somewhere with elbow room: no body within `clear` units. */
-  findSpawn(clear = 220) {
-    for (let attempt = 0; attempt < 80; attempt++) {
-      const angle = Math.random() * TAU;
-      const radius = Math.sqrt(Math.random()) * WORLD.radius * 0.82;
-      const x = Math.cos(angle) * radius;
-      const y = Math.sin(angle) * radius;
-      const blocked = this.bodyGrid.forEachNear(x, y, clear, (point) => {
-        const dx = point.x - x;
-        const dy = point.y - y;
-        return dx * dx + dy * dy < clear * clear ? point : null;
-      });
-      if (!blocked) return { x, y, angle: Math.atan2(-y, -x) };
-    }
-    return null;
   }
 
   /* ------------------------------------------------------------------ *
    * world upkeep
    * ------------------------------------------------------------------ */
 
-  rebuildGrids() {
+  rebuildBodyGrid() {
     this.bodyGrid.clear();
     for (const snake of this.snakes) {
       if (!snake.alive) continue;
-      for (let i = NECK_POINTS; i < snake.path.length; i += COLLIDE_SAMPLE) {
-        const point = snake.path[i];
+      const path = snake.path;
+      for (let i = NECK_POINTS; i < path.length; i += COLLIDE_SAMPLE) {
+        const point = path[i];
         this.bodyGrid.insert(point.x, point.y, point);
       }
     }
+  }
 
+  rebuildFoodGrid() {
     this.foodGrid.clear();
     for (const item of this.food) this.foodGrid.insert(item.x, item.y, item);
+  }
+
+  /** Food gathers in fields, so an open world still has places worth going. */
+  seedClusters() {
+    this.clusters.length = 0;
+    for (let i = 0; i < FOOD.clusters; i++) {
+      const angle = Math.random() * TAU;
+      const radius = Math.sqrt(Math.random()) * WORLD.radius * 0.94;
+      this.clusters.push({
+        x: Math.cos(angle) * radius,
+        y: Math.sin(angle) * radius,
+        radius: randRange(FOOD.clusterRadius[0], FOOD.clusterRadius[1]),
+      });
+    }
+  }
+
+  /** A point inside a random field, or loose in the open. */
+  scatterPoint() {
+    if (this.clusters.length === 0 || Math.random() < FOOD.scatter) {
+      const angle = Math.random() * TAU;
+      const radius = Math.sqrt(Math.random()) * WORLD.radius * 0.97;
+      return { x: Math.cos(angle) * radius, y: Math.sin(angle) * radius };
+    }
+    const cluster = pick(this.clusters);
+    const angle = Math.random() * TAU;
+    const radius = Math.sqrt(Math.random()) * cluster.radius;
+    return { x: cluster.x + Math.cos(angle) * radius, y: cluster.y + Math.sin(angle) * radius };
   }
 
   addFood(x, y, kind, color) {
@@ -433,25 +516,65 @@ export class Game {
     for (const item of this.food) if (item.kind === 'pellet') pellets++;
 
     // Trickle new pellets in during play; fill the arena at round start.
-    let budget = fill ? FOOD.count : Math.min(3, FOOD.count - pellets);
+    let budget = fill ? FOOD.count : Math.min(4, FOOD.count - pellets);
     while (pellets < FOOD.count && budget-- > 0) {
-      const angle = Math.random() * TAU;
-      const radius = Math.sqrt(Math.random()) * WORLD.radius * 0.97;
-      this.addFood(Math.cos(angle) * radius, Math.sin(angle) * radius, 'pellet');
+      const spot = this.scatterPoint();
+      this.addFood(spot.x, spot.y, 'pellet');
       pellets++;
     }
+    if (fill) this.rebuildFoodGrid();
   }
 
   /** A dead snake becomes a trail of food — the reward for taking someone out. */
   dropRemains(snake) {
-    const points = snake.outline();
-    const spacing = Math.max(3, Math.round(22 / SNAKE.pathStep));
+    const path = snake.path;
+    const spacing = Math.max(3, Math.round(24 / SNAKE.pathStep));
     let dropped = 0;
-    for (let i = 0; i < points.length && dropped < 140; i += spacing) {
-      const p = points[i];
-      this.addFood(p.x + randRange(-5, 5), p.y + randRange(-5, 5), 'remains', snake.soft);
+    for (let i = 0; i < path.length && dropped < 160; i += spacing) {
+      const p = path[i];
+      this.addFood(p.x + randRange(-6, 6), p.y + randRange(-6, 6), 'remains', snake.soft);
       dropped++;
     }
+  }
+
+  /** Somewhere with elbow room: no body within `clear` units. */
+  findSpawn(clear = 260) {
+    for (let attempt = 0; attempt < 80; attempt++) {
+      const angle = Math.random() * TAU;
+      const radius = Math.sqrt(Math.random()) * WORLD.radius * 0.88;
+      const x = Math.cos(angle) * radius;
+      const y = Math.sin(angle) * radius;
+      const blocked = this.bodyGrid.forEachNear(x, y, clear, (point) => {
+        const dx = point.x - x;
+        const dy = point.y - y;
+        return dx * dx + dy * dy < clear * clear ? point : null;
+      });
+      if (!blocked) return { x, y, angle: Math.atan2(-y, -x) };
+    }
+    return null;
+  }
+
+  /** Round-start placement: far from everyone already placed. */
+  spreadSpawn(placed, clear) {
+    let best = null;
+    let bestGap = -1;
+    for (let attempt = 0; attempt < 60; attempt++) {
+      const angle = Math.random() * TAU;
+      const radius = Math.sqrt(Math.random()) * WORLD.radius * 0.85;
+      const x = Math.cos(angle) * radius;
+      const y = Math.sin(angle) * radius;
+      let gap = Infinity;
+      for (const other of placed) {
+        const d = Math.hypot(other.x - x, other.y - y);
+        if (d < gap) gap = d;
+      }
+      if (gap > bestGap) {
+        bestGap = gap;
+        best = { x, y, angle: Math.atan2(-y, -x) };
+      }
+      if (gap >= clear) break;
+    }
+    return best;
   }
 
   rankOf(snake) {
@@ -467,7 +590,9 @@ export class Game {
   }
 
   get aliveCount() {
-    return this.snakes.reduce((n, s) => n + (s.alive ? 1 : 0), 0);
+    let n = 0;
+    for (const snake of this.snakes) if (snake.alive) n++;
+    return n;
   }
 
   /* ------------------------------------------------------------------ *
@@ -498,7 +623,8 @@ export class Game {
       const p = this.particles[i];
       p.life -= ms;
       if (p.life <= 0) {
-        this.particles.splice(i, 1);
+        this.particles[i] = this.particles[this.particles.length - 1];
+        this.particles.pop();
         continue;
       }
       p.x += p.vx * dt;

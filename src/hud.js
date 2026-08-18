@@ -1,9 +1,14 @@
 import { formatTime } from './utils.js';
 
+/** Rivals shown in the standings before the list is trimmed. */
+const BOARD_LIMIT = 8;
+
+/** How long a kill-feed line stays up. */
+const FEED_TTL = 3600;
+
 /**
- * Heads-up display: a small tab that shows just score and rank, and expands
- * into the full standings when pressed. Collapsed is the default so the arena
- * stays uncluttered.
+ * Heads-up display: a small tab showing score and rank that expands into the
+ * full standings when pressed, plus a short-lived feed of what just happened.
  */
 export class Hud {
   constructor(root = document) {
@@ -17,6 +22,8 @@ export class Hud {
       length: root.getElementById('stat-length'),
       kills: root.getElementById('stat-kills'),
       best: root.getElementById('stat-best'),
+      alive: root.getElementById('stat-alive'),
+      feed: root.getElementById('feed'),
     };
     this.rows = new Map();
     this.signature = '';
@@ -29,12 +36,14 @@ export class Hud {
     this.open = force ?? !this.open;
     this.el.tab.setAttribute('aria-expanded', String(this.open));
     this.el.panel.hidden = !this.open;
+    this.signature = ''; // force a repaint of whatever just became visible
   }
 
   mount(game) {
     this.el.board.replaceChildren();
     this.rows.clear();
     this.signature = '';
+    this.clearFeed();
 
     for (const snake of game.snakes) {
       const row = document.createElement('li');
@@ -56,27 +65,36 @@ export class Hud {
 
   update(game, best = 0) {
     const rank = game.rankOf(game.player);
-    const board = game.leaderboard();
 
-    const signature = `${game.player.score}|${rank}|${best}|${Math.floor(game.elapsed / 500)}|${board
-      .map((s) => `${s.id}:${s.score}:${s.alive ? 1 : 0}:${s.kills}`)
-      .join(',')}`;
+    // The tab is always visible, so keep it cheap: only the two numbers.
+    if (this.tabScore !== game.player.score || this.tabRank !== rank) {
+      this.tabScore = game.player.score;
+      this.tabRank = rank;
+      this.el.tabScore.textContent = String(game.player.score);
+      this.el.tabRank.textContent = `#${rank}`;
+    }
+
+    if (!this.open) return; // nothing else is on screen
+
+    const board = game.leaderboard();
+    const signature = `${game.player.score}|${rank}|${best}|${game.aliveCount}|${Math.floor(
+      game.elapsed / 500,
+    )}|${board.map((s) => `${s.id}:${s.score}:${s.alive ? 1 : 0}:${s.kills}`).join(',')}`;
     if (signature === this.signature) return;
     this.signature = signature;
-
-    this.el.tabScore.textContent = String(game.player.score);
-    this.el.tabRank.textContent = `#${rank}`;
-
-    if (!this.open) return; // nothing else is visible, so don't touch it
 
     this.el.time.textContent = formatTime(game.elapsed);
     this.el.length.textContent = String(Math.round(game.player.length));
     this.el.kills.textContent = String(game.player.kills);
     this.el.best.textContent = String(best);
+    this.el.alive.textContent = String(game.aliveCount);
 
     board.forEach((snake, index) => {
       const row = this.rows.get(snake.id);
       if (!row) return;
+      // Sixteen rows is a wall — show the leaders, and always you.
+      row.hidden = index >= BOARD_LIMIT && !snake.isPlayer;
+      if (row.hidden) return;
       row.style.order = String(index);
       row.dataset.dead = snake.alive ? 'false' : 'true';
       row.querySelector('.lb-rank').textContent = String(index + 1);
@@ -84,4 +102,32 @@ export class Hud {
       row.querySelector('.lb-score').textContent = String(snake.score);
     });
   }
+
+  /* ------------------------------------------------------------------ *
+   * kill feed
+   * ------------------------------------------------------------------ */
+
+  notify(html, tone = 'neutral') {
+    const line = document.createElement('p');
+    line.className = 'feed-line';
+    line.dataset.tone = tone;
+    line.innerHTML = html;
+    this.el.feed.append(line);
+
+    while (this.el.feed.childElementCount > 4) this.el.feed.firstElementChild.remove();
+
+    setTimeout(() => {
+      line.dataset.leaving = 'true';
+      setTimeout(() => line.remove(), 400);
+    }, FEED_TTL);
+  }
+
+  clearFeed() {
+    this.el.feed.replaceChildren();
+  }
+}
+
+/** Escape a snake name before it goes near innerHTML. */
+export function safeName(name) {
+  return String(name).replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
 }

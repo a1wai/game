@@ -1,10 +1,11 @@
 import { Game } from './game.js';
 import { Renderer } from './renderer.js';
 import { Camera } from './camera.js';
-import { Hud } from './hud.js';
+import { Hud, safeName } from './hud.js';
 import { Sound } from './audio.js';
 import { Controls } from './input.js';
 import { STORAGE_KEY, DIFFICULTY } from './config.js';
+import { lerp } from './utils.js';
 import { readStore, writeStore, formatTime } from './utils.js';
 
 const $ = (id) => document.getElementById(id);
@@ -65,6 +66,7 @@ function startGame() {
   game.start({ difficulty: settings.difficulty });
   camera.snapTo(game.player);
   hud.mount(game);
+  hud.toggle(false);
   setScreen('none');
 }
 
@@ -197,7 +199,28 @@ game.on('eat', ({ snake, kind }) => {
 game.on('kill', ({ killer }) => {
   if (killer.isPlayer) sound.play('bonus');
 });
-game.on('death', ({ snake }) => sound.play(snake.isPlayer ? 'die' : 'kill'));
+game.on('death', ({ snake, killer }) => {
+  sound.play(snake.isPlayer ? 'die' : 'kill');
+  if (snake.isPlayer) {
+    camera.knock(16);
+    return;
+  }
+  if (killer?.isPlayer) {
+    camera.knock(7);
+    hud.notify(`You took out <b>${safeName(snake.name)}</b>`, 'good');
+    return;
+  }
+
+  // In an arena this size most deaths happen out of sight. Report the ones
+  // near enough to matter, and the ones that shift the top of the board.
+  const near = Math.hypot(snake.x - game.player.x, snake.y - game.player.y) < 3500;
+  const rank = game.rankOf(snake);
+  if (!near && rank > 3) return;
+
+  const by = killer ? ` by <b>${safeName(killer.name)}</b>` : '';
+  const where = near ? '' : ` <span class="feed-rank">#${rank}</span>`;
+  hud.notify(`<b>${safeName(snake.name)}</b>${where} went down${by}`);
+});
 game.on('respawn', () => sound.play('respawn'));
 
 const CAUSE_TEXT = {
@@ -246,7 +269,13 @@ function frame(now) {
   game.setIntent(direction ? Math.atan2(direction.y, direction.x) : null, controls.boost);
   game.update(ms);
 
-  if (!game.paused) camera.follow(game.player, ms);
+  // Follow the interpolated head, not the last simulation step, or the camera
+  // reintroduces the judder the interpolation just removed.
+  const player = game.player;
+  const rx = lerp(player.prevX, player.x, game.alpha);
+  const ry = lerp(player.prevY, player.y, game.alpha);
+  if (!game.paused) camera.follow(player, ms, rx, ry);
+
   renderer.draw(game, camera, now);
   hud.update(game, settings.best[settings.difficulty] ?? 0);
 

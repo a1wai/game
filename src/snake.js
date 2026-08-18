@@ -9,6 +9,10 @@ import { TAU, clamp, turnToward } from './utils.js';
  * `path[0]` is the most recent recorded point. Points are plain {x, y, s}
  * objects where `s` is the owner id, so the collision grid can store the very
  * same objects without allocating anything per frame.
+ *
+ * Rendering never allocates either: the previous step's pose is kept so the
+ * renderer can interpolate between steps, and the body is traced straight into
+ * a Path2D rather than built into an array first.
  */
 export class Snake {
   constructor({ id, name, color, soft, isPlayer = false }) {
@@ -24,6 +28,12 @@ export class Snake {
     this.y = 0;
     this.angle = 0;
     this.targetAngle = 0;
+
+    // Pose at the end of the previous step, for render interpolation.
+    this.prevX = 0;
+    this.prevY = 0;
+    this.prevAngle = 0;
+
     this.path = [];
     this.pathLength = 0;
     this.length = SNAKE.startLength;
@@ -39,6 +49,12 @@ export class Snake {
     this.kills = 0;
     this.deaths = 0;
     this.respawnIn = 0;
+
+    // Conservative bounding box, refreshed periodically for view culling.
+    this.minX = 0;
+    this.minY = 0;
+    this.maxX = 0;
+    this.maxY = 0;
   }
 
   /** Body half-width. Grows with length, but sub-linearly so giants stay agile. */
@@ -50,7 +66,10 @@ export class Snake {
   spawn(x, y, angle) {
     this.x = x;
     this.y = y;
+    this.prevX = x;
+    this.prevY = y;
     this.angle = angle;
+    this.prevAngle = angle;
     this.targetAngle = angle;
     this.length = SNAKE.startLength;
     this.alive = true;
@@ -61,7 +80,6 @@ export class Snake {
 
     // Lay the starting body out behind the head so it looks travelled-in.
     this.path = [];
-    this.pathLength = 0;
     const back = { x: -Math.cos(angle), y: -Math.sin(angle) };
     const points = Math.ceil(this.length / SNAKE.pathStep);
     for (let i = 0; i < points; i++) {
@@ -72,6 +90,7 @@ export class Snake {
       });
     }
     this.pathLength = (points - 1) * SNAKE.pathStep;
+    this.updateBounds();
   }
 
   reset() {
@@ -85,8 +104,12 @@ export class Snake {
     this.length = SNAKE.startLength;
   }
 
-  /** Steer, move, and record the trail. Returns true if boost actually engaged. */
+  /** Steer, move, and record the trail. */
   advance(dt, speedScale = 1) {
+    this.prevX = this.x;
+    this.prevY = this.y;
+    this.prevAngle = this.angle;
+
     const boosting = this.wantsBoost && this.length > SNAKE.minBoostLength;
     this.boosting = boosting;
 
@@ -95,12 +118,11 @@ export class Snake {
     if (this.angle > Math.PI) this.angle -= TAU;
     else if (this.angle < -Math.PI) this.angle += TAU;
 
-    const speed = (boosting ? SNAKE.boostSpeed : SNAKE.speed) * speedScale;
-    this.x += Math.cos(this.angle) * speed * dt;
-    this.y += Math.sin(this.angle) * speed * dt;
+    this.speed = (boosting ? SNAKE.boostSpeed : SNAKE.speed) * speedScale;
+    this.x += Math.cos(this.angle) * this.speed * dt;
+    this.y += Math.sin(this.angle) * this.speed * dt;
 
     this.recordPath();
-    return boosting;
   }
 
   recordPath() {
@@ -109,7 +131,9 @@ export class Snake {
       this.path.unshift({ x: this.x, y: this.y, s: this.id });
       return;
     }
-    const step = Math.hypot(this.x - head.x, this.y - head.y);
+    const dx = this.x - head.x;
+    const dy = this.y - head.y;
+    const step = Math.sqrt(dx * dx + dy * dy);
     if (step >= SNAKE.pathStep) {
       this.path.unshift({ x: this.x, y: this.y, s: this.id });
       this.pathLength += step;
@@ -117,13 +141,25 @@ export class Snake {
     this.trim();
   }
 
-  /** Drop trail points the body has outgrown. */
+  /**
+   * Drop trail points the body has outgrown. The live head-to-path[0] stub
+   * counts toward the total, so the stored trail matches what gets drawn to
+   * within one step — you can't be killed by a tail that isn't on screen.
+   */
   trim() {
+    const head = this.path[0];
+    if (!head) return;
+    const hdx = this.x - head.x;
+    const hdy = this.y - head.y;
+    const stub = Math.sqrt(hdx * hdx + hdy * hdy);
+
     while (this.path.length > 2) {
       const a = this.path[this.path.length - 1];
       const b = this.path[this.path.length - 2];
-      const seg = Math.hypot(a.x - b.x, a.y - b.y);
-      if (this.pathLength - seg < this.length) break;
+      const dx = a.x - b.x;
+      const dy = a.y - b.y;
+      const seg = Math.sqrt(dx * dx + dy * dy);
+      if (this.pathLength + stub - seg < this.length) break;
       this.path.pop();
       this.pathLength -= seg;
     }
@@ -138,27 +174,70 @@ export class Snake {
     this.trim();
   }
 
-  /**
-   * Body centreline from head to tail, in world space. The final point is
-   * interpolated so the tail slides instead of popping a whole step at a time.
-   */
-  outline() {
-    const points = [{ x: this.x, y: this.y }];
-    for (let i = 0; i < this.path.length; i++) points.push(this.path[i]);
-
-    const overflow = this.pathLength - this.length;
-    if (overflow > 0 && points.length > 2) {
-      const tail = points[points.length - 1];
-      const prev = points[points.length - 2];
-      const seg = Math.hypot(tail.x - prev.x, tail.y - prev.y);
-      if (seg > 0.001) {
-        const t = clamp(overflow / seg, 0, 1);
-        points[points.length - 1] = {
-          x: tail.x + (prev.x - tail.x) * t,
-          y: tail.y + (prev.y - tail.y) * t,
-        };
-      }
+  /** Cheap conservative box around the whole body, for view culling. */
+  updateBounds() {
+    let minX = this.x;
+    let maxX = this.x;
+    let minY = this.y;
+    let maxY = this.y;
+    for (let i = 0; i < this.path.length; i += 8) {
+      const p = this.path[i];
+      if (p.x < minX) minX = p.x;
+      else if (p.x > maxX) maxX = p.x;
+      if (p.y < minY) minY = p.y;
+      else if (p.y > maxY) maxY = p.y;
     }
-    return points;
+    this.minX = minX;
+    this.minY = minY;
+    this.maxX = maxX;
+    this.maxY = maxY;
+  }
+
+  /**
+   * Trace the body centreline into a Path2D, from an interpolated head back
+   * along exactly `length` of trail. Allocates nothing.
+   *
+   * @param {Path2D} path
+   * @param {number} hx interpolated head x
+   * @param {number} hy interpolated head y
+   * @param {number} stride skip trail points when they'd land sub-pixel apart
+   */
+  traceInto(path, hx, hy, stride = 1) {
+    const points = this.path;
+    if (points.length === 0) return;
+
+    path.moveTo(hx, hy);
+
+    // Interpolating the head backwards can leave it behind the newest trail
+    // point; skip anything that now sits in front of it.
+    const cos = Math.cos(this.angle);
+    const sin = Math.sin(this.angle);
+    let start = 0;
+    while (
+      start < points.length - 1 &&
+      (points[start].x - hx) * cos + (points[start].y - hy) * sin > 0
+    ) {
+      start++;
+    }
+
+    let remaining = this.length;
+    let px = hx;
+    let py = hy;
+
+    for (let i = start; i < points.length; i += stride) {
+      const p = points[i];
+      const dx = p.x - px;
+      const dy = p.y - py;
+      const d = Math.sqrt(dx * dx + dy * dy);
+      if (d >= remaining) {
+        const t = d > 0 ? remaining / d : 0;
+        path.lineTo(px + dx * t, py + dy * t);
+        return;
+      }
+      path.lineTo(p.x, p.y);
+      remaining -= d;
+      px = p.x;
+      py = p.y;
+    }
   }
 }
