@@ -1,60 +1,63 @@
 import {
-  GRID,
-  CELL,
-  AI_COUNT,
-  START_LENGTH,
-  FOOD_TARGET,
-  FOOD_TYPES,
+  WORLD,
+  RIVAL_COUNT,
+  SNAKE,
+  FOOD,
+  FOOD_COLORS,
+  DIFFICULTY,
+  PLAYER_SKIN,
+  RIVAL_SKINS,
   RESPAWN_DELAY,
   COUNTDOWN,
   MAX_PARTICLES,
   KILL_BOUNTY,
   DEATH_SCORE_KEPT,
-  DIFFICULTY,
-  PLAYER_SKIN,
-  AI_SKINS,
-  SPAWN_SLOTS,
 } from './config.js';
-import { Board, DIRS, DIR_KEYS, OPPOSITE } from './board.js';
 import { Snake } from './snake.js';
-import { decideDirection } from './ai.js';
-import { randInt, pick } from './utils.js';
+import { SpatialGrid } from './grid.js';
+import { steerRival } from './ai.js';
+import { TAU, clamp, pick, randRange } from './utils.js';
+
+/** Simulation runs on a fixed step so physics stays identical at any framerate. */
+const STEP = 1 / 60;
+
+/** Every Nth trail point goes into the collision grid — they overlap anyway. */
+const COLLIDE_SAMPLE = 3;
+
+/** Trail points this close to the head are covered by the head circle instead. */
+const NECK_POINTS = 6;
 
 /**
- * The arena simulation. Pure state + logic: it never touches the DOM and never
- * draws anything, it just advances on a fixed timestep and emits events.
+ * The arena simulation. Pure state and rules: it never touches the DOM and
+ * never draws, so the whole thing runs headless under Node.
  */
 export class Game {
   constructor() {
-    this.board = new Board(GRID.cols, GRID.rows, false);
     this.snakes = [];
-    this.food = new Map(); // board index -> { x, y, type, seed }
-    this.particles = [];
-    this.listeners = new Map();
-
     this.player = new Snake({ id: 0, ...PLAYER_SKIN, isPlayer: true });
     this.snakes.push(this.player);
-    for (let i = 0; i < AI_COUNT; i++) {
-      this.snakes.push(new Snake({ id: i + 1, ...AI_SKINS[i % AI_SKINS.length] }));
+    for (let i = 0; i < RIVAL_COUNT; i++) {
+      this.snakes.push(new Snake({ id: i + 1, ...RIVAL_SKINS[i % RIVAL_SKINS.length] }));
     }
 
-    this.turnQueue = [];
+    this.food = [];
+    this.particles = [];
+    this.bodyGrid = new SpatialGrid(64);
+    this.foodGrid = new SpatialGrid(96);
+    this.listeners = new Map();
+
+    /** What the player is asking for this frame. */
+    this.intent = { angle: null, boost: false };
+
     this.difficulty = DIFFICULTY.normal;
     this.difficultyKey = 'normal';
-    this.tickMs = this.difficulty.tick;
-
     this.running = false;
     this.paused = false;
     this.over = false;
     this.countdown = 0;
     this.elapsed = 0;
-    this.ticks = 0;
     this.acc = 0;
-    this.alpha = 1;
     this.result = null;
-
-    this._blocked = new Uint8Array(this.board.size);
-    this._risky = new Uint8Array(this.board.size);
   }
 
   /* ------------------------------------------------------------------ *
@@ -77,26 +80,24 @@ export class Game {
    * lifecycle
    * ------------------------------------------------------------------ */
 
-  start({ difficulty = 'normal', wrap = false } = {}) {
+  start({ difficulty = 'normal' } = {}) {
     this.difficultyKey = DIFFICULTY[difficulty] ? difficulty : 'normal';
     this.difficulty = DIFFICULTY[this.difficultyKey];
-    this.tickMs = this.difficulty.tick;
-    this.board.wrap = wrap;
 
-    this.food.clear();
+    this.food.length = 0;
     this.particles.length = 0;
-    this.turnQueue.length = 0;
+    this.intent = { angle: null, boost: false };
 
-    const slots = SPAWN_SLOTS.slice(0, this.snakes.length);
+    // Spread everyone evenly around a ring, facing the middle.
     this.snakes.forEach((snake, i) => {
-      const slot = slots[i];
-      const x = Math.round(slot.fx * (this.board.cols - 1));
-      const y = Math.round(slot.fy * (this.board.rows - 1));
+      const angle = (i / this.snakes.length) * TAU + randRange(-0.2, 0.2);
+      const radius = WORLD.radius * 0.55;
       snake.reset();
-      snake.spawn(x, y, slot.dir, START_LENGTH);
+      snake.spawn(Math.cos(angle) * radius, Math.sin(angle) * radius, angle + Math.PI);
     });
 
-    this.replenishFood();
+    this.replenishFood(true);
+    this.rebuildGrids();
 
     this.running = true;
     this.paused = false;
@@ -104,11 +105,27 @@ export class Game {
     this.result = null;
     this.countdown = COUNTDOWN;
     this.elapsed = 0;
-    this.ticks = 0;
     this.acc = 0;
-    this.alpha = 1;
 
     this.emit('start', this);
+  }
+
+  /**
+   * Populate the arena without starting a round, so the menu has a real scene
+   * behind it instead of a blank sheet. Nothing moves until start().
+   */
+  preview() {
+    this.food.length = 0;
+    this.snakes.forEach((snake, i) => {
+      const angle = (i / this.snakes.length) * TAU;
+      const radius = WORLD.radius * 0.5;
+      snake.reset();
+      snake.spawn(Math.cos(angle) * radius, Math.sin(angle) * radius, angle + Math.PI * 0.8);
+      snake.grow(200 + i * 90);
+      for (let step = 0; step < 90; step++) snake.advance(1 / 60);
+    });
+    this.replenishFood(true);
+    this.rebuildGrids();
   }
 
   togglePause(force) {
@@ -118,13 +135,18 @@ export class Game {
     this.emit('pause', this.paused);
   }
 
-  /** Advance the world by `dt` milliseconds of wall clock. */
-  update(dt) {
-    this.stepParticles(dt);
+  setIntent(angle, boost) {
+    this.intent.angle = angle;
+    this.intent.boost = boost;
+  }
+
+  /** Advance by `ms` of wall clock, in fixed simulation steps. */
+  update(ms) {
+    this.stepParticles(ms);
     if (!this.running || this.paused) return;
 
     if (this.countdown > 0) {
-      this.countdown -= dt;
+      this.countdown -= ms;
       if (this.countdown <= 0) {
         this.countdown = 0;
         this.emit('go');
@@ -132,146 +154,176 @@ export class Game {
       return;
     }
 
-    this.elapsed += dt;
-
+    this.elapsed += ms;
     for (const snake of this.snakes) {
       if (snake.alive || snake.isPlayer) continue;
-      snake.respawnIn -= dt;
+      snake.respawnIn -= ms;
       if (snake.respawnIn <= 0) this.respawn(snake);
     }
 
-    this.acc += dt;
+    this.acc += ms / 1000;
     let guard = 0;
-    while (this.acc >= this.tickMs && this.running && guard++ < 4) {
-      this.acc -= this.tickMs;
-      this.tick();
+    while (this.acc >= STEP && this.running && guard++ < 5) {
+      this.acc -= STEP;
+      this.step(STEP);
     }
-    this.alpha = this.running ? Math.min(this.acc / this.tickMs, 1) : 1;
   }
 
   /* ------------------------------------------------------------------ *
-   * simulation step
+   * one simulation step
    * ------------------------------------------------------------------ */
 
-  tick() {
-    this.ticks++;
-    const board = this.board;
+  step(dt) {
     const alive = this.snakes.filter((s) => s.alive);
 
-    // 1. Everyone commits to a direction from the same snapshot of the world.
-    const blocked = this.buildOccupancy();
-    const foodSet = new Set(this.food.keys());
+    // 1. Intent. Rivals think; the player's steering arrives from outside.
+    const ctx = {
+      bodyGrid: this.bodyGrid,
+      foodGrid: this.foodGrid,
+      snakes: this.snakes,
+      tuning: this.difficulty.tuning,
+      dt,
+    };
     for (const snake of alive) {
       if (snake.autopilot) {
-        snake.dir = decideDirection(snake, {
-          board,
-          blocked,
-          risky: this.buildRisk(snake),
-          food: foodSet,
-          tuning: this.difficulty.tuning,
-        });
+        steerRival(snake, ctx, dt);
       } else if (snake.isPlayer) {
-        const next = this.turnQueue.shift();
-        if (next) snake.dir = next;
+        if (this.intent.angle !== null) snake.targetAngle = this.intent.angle;
+        snake.wantsBoost = this.intent.boost;
       }
     }
 
-    // 2. Where each head lands (null = off a solid edge).
-    const nextHead = new Map();
-    const willGrow = new Map();
+    // 2. Move, and pay for any boosting.
     for (const snake of alive) {
-      const cell = board.step(snake.head.x, snake.head.y, snake.dir);
-      nextHead.set(snake, cell);
-      willGrow.set(
-        snake,
-        snake.growth > 0 || (cell != null && this.food.has(board.index(cell.x, cell.y))),
-      );
+      snake.advance(dt, this.difficulty.speedScale);
+      if (snake.boosting) this.payForBoost(snake, dt);
     }
 
-    // 3. Cells that will still be solid after everyone has moved. A tail is
-    //    only an obstacle if its owner is growing and therefore won't vacate it.
-    const solid = new Map(); // index -> owning snake
-    for (const snake of alive) {
-      const last = snake.length - 1;
-      for (let i = 0; i <= last; i++) {
-        if (i === last && last > 0 && !willGrow.get(snake)) continue;
-        solid.set(board.index(snake.body[i].x, snake.body[i].y), snake);
+    // 3. Refresh the lookup grids against the new positions.
+    this.rebuildGrids();
+
+    // 4. Eat.
+    for (const snake of alive) this.feed(snake, dt);
+
+    // 5. Work out who died, then apply it all at once so ties are fair.
+    const deaths = this.collide(alive);
+    for (const [snake, info] of deaths) this.kill(snake, info);
+
+    this.replenishFood(false);
+  }
+
+  payForBoost(snake, dt) {
+    const burn = SNAKE.boostDrain * dt;
+    snake.shrink(burn);
+
+    // Length burns continuously, but score is a whole number — bank the
+    // fraction and spend it a point at a time.
+    snake.scoreDebt += burn * (FOOD.pellet.value / FOOD.pellet.length);
+    const points = Math.floor(snake.scoreDebt);
+    if (points > 0) {
+      snake.scoreDebt -= points;
+      snake.score = Math.max(0, snake.score - points);
+    }
+
+    // Boosting sheds mass into the world — that's what makes it a real cost.
+    snake.crumbTimer -= dt;
+    if (snake.crumbTimer <= 0) {
+      snake.crumbTimer = SNAKE.boostCrumbEvery;
+      const tail = snake.path[snake.path.length - 1];
+      if (tail) {
+        this.addFood(
+          tail.x + randRange(-6, 6),
+          tail.y + randRange(-6, 6),
+          'crumb',
+          snake.soft,
+        );
+      }
+    }
+  }
+
+  /** Pull nearby pellets in, swallow the ones that reach the head. */
+  feed(snake, dt) {
+    const reach = FOOD.magnetRadius + snake.radius;
+    let eaten = 0;
+
+    this.foodGrid.forEachNear(snake.x, snake.y, reach, (item) => {
+      if (item.gone) return null;
+      const dx = snake.x - item.x;
+      const dy = snake.y - item.y;
+      const d = Math.hypot(dx, dy);
+
+      if (d < snake.radius + item.radius) {
+        item.gone = true;
+        eaten++;
+        snake.grow(item.length);
+        snake.score += item.value;
+        this.burst(item.x, item.y, item.color, 5, 40);
+        this.emit('eat', { snake, kind: item.kind });
+        return null;
+      }
+      if (d < reach && d > 0.001) {
+        const pull = FOOD.magnetSpeed * dt * (1 - d / reach);
+        item.x += (dx / d) * pull;
+        item.y += (dy / d) * pull;
+      }
+      return null;
+    });
+
+    if (eaten) this.food = this.food.filter((f) => !f.gone);
+  }
+
+  /**
+   * Deaths, decided from the post-move state.
+   * A snake never collides with itself — only rivals and the rim are lethal.
+   */
+  collide(alive) {
+    const deaths = new Map();
+
+    // Head to head: the longer snake wins, equal lengths take each other out.
+    for (let i = 0; i < alive.length; i++) {
+      for (let j = i + 1; j < alive.length; j++) {
+        const a = alive[i];
+        const b = alive[j];
+        const reach = a.radius * 0.9 + b.radius * 0.9;
+        if (Math.hypot(a.x - b.x, a.y - b.y) > reach) continue;
+        if (a.length > b.length * 1.02) deaths.set(b, { cause: 'head', killer: a });
+        else if (b.length > a.length * 1.02) deaths.set(a, { cause: 'head', killer: b });
+        else {
+          deaths.set(a, { cause: 'head', killer: null });
+          deaths.set(b, { cause: 'head', killer: null });
+        }
       }
     }
 
-    // 4. Deaths: walls, bodies (yours or anyone's), then head-on trades.
-    const deaths = new Map(); // snake -> { cause, killer }
-    for (const snake of alive) {
-      const cell = nextHead.get(snake);
-      if (!cell) {
-        deaths.set(snake, { cause: 'wall', killer: null });
-        continue;
-      }
-      const owner = solid.get(board.index(cell.x, cell.y));
-      if (owner) {
-        deaths.set(snake, {
-          cause: owner === snake ? 'self' : 'body',
-          killer: owner === snake ? null : owner,
-        });
-      }
-    }
-
-    const contested = new Map(); // index -> snakes aiming at it
-    for (const snake of alive) {
-      const cell = nextHead.get(snake);
-      if (!cell) continue;
-      const key = board.index(cell.x, cell.y);
-      const group = contested.get(key);
-      if (group) group.push(snake);
-      else contested.set(key, [snake]);
-    }
-    for (const group of contested.values()) {
-      if (group.length < 2) continue;
-      // Longest snake wins the exchange; a tie wipes out everyone involved.
-      const longest = Math.max(...group.map((s) => s.length));
-      const winners = group.filter((s) => s.length === longest);
-      const winner = winners.length === 1 ? winners[0] : null;
-      for (const snake of group) {
-        if (snake === winner) continue;
-        if (!deaths.has(snake)) deaths.set(snake, { cause: 'head', killer: winner });
-      }
-    }
-
-    // 5. Survivors move and eat.
     for (const snake of alive) {
       if (deaths.has(snake)) continue;
-      const cell = nextHead.get(snake);
-      snake.lastTail = null;
-      snake.body.unshift({ x: cell.x, y: cell.y });
 
-      const key = board.index(cell.x, cell.y);
-      const morsel = this.food.get(key);
-      if (morsel) {
-        const type = FOOD_TYPES[morsel.type];
-        this.food.delete(key);
-        snake.growth += type.grow;
-        snake.score += type.value;
-        this.burst(cell.x, cell.y, type.color, 12, 1.6);
-        this.emit('eat', { snake, type: morsel.type });
+      if (Math.hypot(snake.x, snake.y) > WORLD.radius) {
+        deaths.set(snake, { cause: 'edge', killer: null });
+        continue;
       }
 
-      if (snake.growth > 0) snake.growth--;
-      else snake.lastTail = snake.body.pop();
+      const hit = this.bodyGrid.forEachNear(snake.x, snake.y, snake.radius + SNAKE.maxRadius, (point) => {
+        if (point.s === snake.id) return null; // you cannot run into yourself
+        const other = this.snakes[point.s];
+        if (!other || !other.alive) return null;
+        const reach = snake.radius * 0.82 + other.radius * 0.86;
+        const dx = point.x - snake.x;
+        const dy = point.y - snake.y;
+        return dx * dx + dy * dy < reach * reach ? other : null;
+      });
+      if (hit) deaths.set(snake, { cause: 'body', killer: hit });
     }
 
-    // 6. Resolve the fallen.
-    for (const [snake, info] of deaths) {
-      this.kill(snake, info);
-    }
-
-    this.replenishFood();
-    this.emit('tick', this);
+    return deaths;
   }
 
   kill(snake, info) {
+    if (!snake.alive) return;
     snake.alive = false;
     snake.deaths++;
-    snake.lastTail = null;
+    snake.wantsBoost = false;
+    snake.boosting = false;
 
     const killer = info.killer;
     if (killer && killer !== snake) {
@@ -281,9 +333,7 @@ export class Game {
     }
 
     this.dropRemains(snake);
-    const head = snake.body[0];
-    if (head) this.burst(head.x, head.y, snake.color, 26, 2.6);
-
+    this.burst(snake.x, snake.y, snake.color, 26, 150);
     this.emit('death', { snake, ...info });
 
     if (snake.isPlayer) {
@@ -292,7 +342,8 @@ export class Game {
       // Rivals come back, but a death costs them half the standings.
       snake.score = Math.floor(snake.score * DEATH_SCORE_KEPT);
       snake.respawnIn = RESPAWN_DELAY;
-      snake.body = [];
+      snake.path = [];
+      snake.pathLength = 0;
     }
   }
 
@@ -300,13 +351,12 @@ export class Game {
     this.running = false;
     this.over = true;
     this.paused = false;
-    this.alpha = 1;
     this.result = {
       score: this.player.score,
       rank: this.rankOf(this.player),
       total: this.snakes.length,
       kills: this.player.kills,
-      length: this.player.length,
+      length: Math.round(this.player.length),
       time: this.elapsed,
       cause: info.cause,
       killer: info.killer ? info.killer.name : null,
@@ -316,104 +366,92 @@ export class Game {
   }
 
   respawn(snake) {
-    const spot = this.findSpawn(START_LENGTH);
+    const spot = this.findSpawn();
     if (!spot) {
-      snake.respawnIn = 400; // arena is crowded, try again shortly
+      snake.respawnIn = 500; // crowded right now, try again shortly
       return;
     }
-    snake.spawn(spot.x, spot.y, spot.dir, START_LENGTH);
-    this.burst(spot.x, spot.y, snake.color, 16, 1.8);
+    snake.spawn(spot.x, spot.y, spot.angle);
+    this.burst(spot.x, spot.y, snake.soft, 14, 70);
     this.emit('respawn', { snake });
   }
 
+  /** Somewhere with elbow room: no body within `clear` units. */
+  findSpawn(clear = 220) {
+    for (let attempt = 0; attempt < 80; attempt++) {
+      const angle = Math.random() * TAU;
+      const radius = Math.sqrt(Math.random()) * WORLD.radius * 0.82;
+      const x = Math.cos(angle) * radius;
+      const y = Math.sin(angle) * radius;
+      const blocked = this.bodyGrid.forEachNear(x, y, clear, (point) => {
+        const dx = point.x - x;
+        const dy = point.y - y;
+        return dx * dx + dy * dy < clear * clear ? point : null;
+      });
+      if (!blocked) return { x, y, angle: Math.atan2(-y, -x) };
+    }
+    return null;
+  }
+
   /* ------------------------------------------------------------------ *
-   * world helpers
+   * world upkeep
    * ------------------------------------------------------------------ */
 
-  /** Occupancy snapshot used for AI planning (tails about to move are free). */
-  buildOccupancy() {
-    const grid = this._blocked;
-    grid.fill(0);
+  rebuildGrids() {
+    this.bodyGrid.clear();
     for (const snake of this.snakes) {
       if (!snake.alive) continue;
-      const last = snake.length - 1;
-      for (let i = 0; i <= last; i++) {
-        if (i === last && last > 0 && snake.growth === 0) continue;
-        grid[this.board.index(snake.body[i].x, snake.body[i].y)] = 1;
+      for (let i = NECK_POINTS; i < snake.path.length; i += COLLIDE_SAMPLE) {
+        const point = snake.path[i];
+        this.bodyGrid.insert(point.x, point.y, point);
       }
     }
-    return grid;
+
+    this.foodGrid.clear();
+    for (const item of this.food) this.foodGrid.insert(item.x, item.y, item);
   }
 
-  /** Cells a rival head (that would win or tie a head-on) can reach next tick. */
-  buildRisk(self) {
-    const grid = this._risky;
-    grid.fill(0);
-    for (const other of this.snakes) {
-      if (!other.alive || other === self || other.length < self.length) continue;
-      for (const dir of DIR_KEYS) {
-        if (other.length > 1 && dir === OPPOSITE[other.dir]) continue;
-        const cell = this.board.step(other.head.x, other.head.y, dir);
-        if (cell) grid[this.board.index(cell.x, cell.y)] = 1;
-      }
-    }
-    return grid;
+  addFood(x, y, kind, color) {
+    const spec = FOOD[kind];
+    const item = {
+      x,
+      y,
+      kind,
+      radius: spec.radius,
+      value: spec.value,
+      length: spec.length,
+      color: color ?? pick(FOOD_COLORS),
+      seed: Math.random() * 1000,
+      gone: false,
+    };
+    this.food.push(item);
+    return item;
   }
 
-  isOccupied(x, y) {
-    for (const snake of this.snakes) {
-      if (!snake.alive) continue;
-      for (const cell of snake.body) {
-        if (cell.x === x && cell.y === y) return true;
-      }
-    }
-    return false;
-  }
-
-  replenishFood() {
+  replenishFood(fill) {
     let pellets = 0;
-    for (const item of this.food.values()) if (item.type === 'pellet') pellets++;
-    let attempts = 0;
-    while (pellets < FOOD_TARGET && attempts++ < 500) {
-      const x = randInt(0, this.board.cols - 1);
-      const y = randInt(0, this.board.rows - 1);
-      const key = this.board.index(x, y);
-      if (this.food.has(key) || this.isOccupied(x, y)) continue;
-      this.food.set(key, { x, y, type: 'pellet', seed: Math.random() * 1000 });
+    for (const item of this.food) if (item.kind === 'pellet') pellets++;
+
+    // Trickle new pellets in during play; fill the arena at round start.
+    let budget = fill ? FOOD.count : Math.min(3, FOOD.count - pellets);
+    while (pellets < FOOD.count && budget-- > 0) {
+      const angle = Math.random() * TAU;
+      const radius = Math.sqrt(Math.random()) * WORLD.radius * 0.97;
+      this.addFood(Math.cos(angle) * radius, Math.sin(angle) * radius, 'pellet');
       pellets++;
     }
   }
 
-  /** A dead snake becomes a trail of bonus pellets — the reward for a kill. */
+  /** A dead snake becomes a trail of food — the reward for taking someone out. */
   dropRemains(snake) {
+    const points = snake.outline();
+    const spacing = Math.max(3, Math.round(22 / SNAKE.pathStep));
     let dropped = 0;
-    for (let i = 0; i < snake.body.length && dropped < 12; i += 2) {
-      const cell = snake.body[i];
-      const key = this.board.index(cell.x, cell.y);
-      if (this.food.has(key)) continue;
-      this.food.set(key, { x: cell.x, y: cell.y, type: 'remains', seed: Math.random() * 1000 });
+    for (let i = 0; i < points.length && dropped < 140; i += spacing) {
+      const p = points[i];
+      this.addFood(p.x + randRange(-5, 5), p.y + randRange(-5, 5), 'remains', snake.soft);
       dropped++;
     }
-  }
-
-  /** A free cell with a clear runway ahead, for respawning without instant death. */
-  findSpawn(length) {
-    for (let attempt = 0; attempt < 400; attempt++) {
-      const dir = pick(DIR_KEYS);
-      const d = DIRS[dir];
-      const x = randInt(3, this.board.cols - 4);
-      const y = randInt(3, this.board.rows - 4);
-
-      let ok = true;
-      for (let i = -(length - 1); i <= 4 && ok; i++) {
-        const cx = x + d.x * i;
-        const cy = y + d.y * i;
-        if (!this.board.inBounds(cx, cy)) ok = false;
-        else if (this.isOccupied(cx, cy)) ok = false;
-      }
-      if (ok) return { x, y, dir };
-    }
-    return null;
   }
 
   rankOf(snake) {
@@ -433,58 +471,40 @@ export class Game {
   }
 
   /* ------------------------------------------------------------------ *
-   * input
-   * ------------------------------------------------------------------ */
-
-  /**
-   * Buffer a turn. Up to two are held so a fast double-tap (right → up) both
-   * register instead of the second one being swallowed by the same tick.
-   */
-  queueTurn(dir) {
-    if (!DIRS[dir] || !this.running || this.paused || !this.player.alive) return;
-    if (this.turnQueue.length >= 2) return;
-    const last = this.turnQueue.length ? this.turnQueue[this.turnQueue.length - 1] : this.player.dir;
-    if (dir === last || dir === OPPOSITE[last]) return;
-    this.turnQueue.push(dir);
-  }
-
-  /* ------------------------------------------------------------------ *
    * particles (pure eye candy, safe to starve)
    * ------------------------------------------------------------------ */
 
-  burst(cellX, cellY, color, count, speed = 2) {
+  burst(x, y, color, count, speed) {
     if (this.particles.length > MAX_PARTICLES) return;
-    const x = cellX * CELL + CELL / 2;
-    const y = cellY * CELL + CELL / 2;
     for (let i = 0; i < count; i++) {
-      const angle = Math.random() * Math.PI * 2;
+      const angle = Math.random() * TAU;
       const velocity = speed * (0.35 + Math.random());
       this.particles.push({
         x,
         y,
         vx: Math.cos(angle) * velocity,
         vy: Math.sin(angle) * velocity,
-        life: 340 + Math.random() * 420,
-        maxLife: 760,
-        size: 1.6 + Math.random() * 2.6,
+        life: 380 + Math.random() * 420,
+        maxLife: 800,
+        size: 2 + Math.random() * 4,
         color,
       });
     }
   }
 
-  stepParticles(dt) {
-    const scale = dt / 16.67;
+  stepParticles(ms) {
+    const dt = ms / 1000;
     for (let i = this.particles.length - 1; i >= 0; i--) {
       const p = this.particles[i];
-      p.life -= dt;
+      p.life -= ms;
       if (p.life <= 0) {
         this.particles.splice(i, 1);
         continue;
       }
-      p.x += p.vx * scale;
-      p.y += p.vy * scale;
-      p.vx *= 0.94;
-      p.vy *= 0.94;
+      p.x += p.vx * dt;
+      p.y += p.vy * dt;
+      p.vx *= 0.92;
+      p.vy *= 0.92;
     }
   }
 }
